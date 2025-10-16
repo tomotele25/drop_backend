@@ -6,7 +6,7 @@ const connectToDb = require("../database/db");
 const authRoute = require("../routes/authRoute");
 const rideRoute = require("../routes/rideRoute");
 const riderRoute = require("../routes/riderRoute");
-const allowedOrigins = ["http://localhost:3000"];
+const allowedOrigins = ["http://localhost:3000", "https://drop-red.vercel.app"];
 
 app.use(
   cors({
