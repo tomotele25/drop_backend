@@ -1,24 +1,37 @@
 const User = require("../model/user");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
+
+// ✅ SIGNUP CONTROLLER
 const signup = async (req, res) => {
-  const { email, fullname, contact, password } = req.body;
   try {
+    const { email, fullname, contact, password } = req.body;
+
     if (!email || !fullname || !contact || !password) {
-      return res.status(400).json({ success: false, message });
+      return res.status(400).json({
+        success: false,
+        message: "All fields are required",
+      });
     }
 
-    const existingUser = await User.findOne({ email });
+    // Check if user already exists by email or contact
+    const existingUser = await User.findOne({
+      $or: [{ email }, { contact }],
+    });
+
     if (existingUser) {
-      return res
-        .status(400)
-        .json({ success: false, message: "User already exists" });
+      return res.status(400).json({
+        success: false,
+        message: "User already exists",
+      });
     }
 
+    // Hash password
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
-    const newUser = await new User({
+    // Save new user
+    const newUser = new User({
       fullname,
       contact,
       email,
@@ -26,21 +39,22 @@ const signup = async (req, res) => {
       role: "customer",
     });
 
-    newUser.save();
+    await newUser.save();
 
-    res.status(200).json({
+    return res.status(201).json({
       success: true,
       message: "User created successfully",
     });
   } catch (error) {
-    console.error("Error Signing up", error.message);
-    res.status(500).json({
+    console.error("Signup error:", error.message);
+    return res.status(500).json({
       success: false,
       message: "Server error",
     });
   }
 };
 
+// ✅ LOGIN CONTROLLER
 const login = async (req, res) => {
   try {
     const { contact, password } = req.body;
@@ -52,6 +66,7 @@ const login = async (req, res) => {
       });
     }
 
+    // Find user by contact
     const user = await User.findOne({ contact });
     if (!user) {
       return res.status(400).json({
@@ -60,19 +75,26 @@ const login = async (req, res) => {
       });
     }
 
+    // Compare password
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
+      console.log("❌ Password mismatch");
+      console.log("Provided:", password);
+      console.log("Stored hash:", user.password);
       return res.status(400).json({
         success: false,
         message: "Invalid credentials",
       });
     }
 
-    const accessToken = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
-      expiresIn: "2d",
-    });
+    // Sign JWT token
+    const accessToken = jwt.sign(
+      { id: user._id, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: "2d" }
+    );
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       accessToken,
       user: {
@@ -84,9 +106,12 @@ const login = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Login error:", error);
-    res.status(500).json({ success: false, message: "Server error" });
+    console.error("Login error:", error.message);
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
   }
 };
 
-module.exports = { login, signup };
+module.exports = { signup, login };

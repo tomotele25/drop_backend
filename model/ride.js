@@ -1,32 +1,69 @@
 const mongoose = require("mongoose");
 
 const rideSchema = new mongoose.Schema({
-  seats: {
-    type: Number,
-    required: true,
+  driver: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Rider",
+    required: false,
   },
-  location: {
+  pickup: {
     type: String,
     required: true,
+    trim: true,
   },
   destination: {
     type: String,
     required: true,
+    trim: true,
   },
+
   rideType: {
     type: String,
-    enum: ["standard", "shared", "premium"],
-    required: true,
+    enum: ["standard", "premium", "shared"],
+    default: "standard",
   },
-  driver: {
+
+  totalSeats: {
+    type: Number,
+    default: 6,
+  },
+  availableSeats: {
+    type: Number,
+    default: 4,
+  },
+
+  passengerName: {
     type: String,
-    required: true,
+    required: function () {
+      return this.rideType !== "shared";
+    },
   },
-  price: {
+
+  passengers: [
+    {
+      name: {
+        type: String,
+        required: true,
+      },
+      userId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+      },
+    },
+  ],
+
+  basePrice: {
     type: Number,
     required: true,
   },
-  bookedAt: {
+
+  status: {
+    type: String,
+    enum: ["available", "ongoing", "completed"],
+    default: "available",
+  },
+
+  createdAt: {
     type: Date,
     default: Date.now,
   },

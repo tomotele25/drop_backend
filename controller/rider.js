@@ -13,7 +13,6 @@ const createRider = async (req, res) => {
   } = req.body;
 
   try {
-    // ✅ Check required fields
     if (
       !fullname ||
       !email ||
