@@ -1,43 +1,104 @@
+const { config } = require("dotenv");
 const Ride = require("../model/ride");
 const Rider = require("../model/rider");
 const Room = require("../model/room");
+const axios = require("axios");
 
-const TOTAL_SEATS = 6; // Fixed total seats for shared rooms
+const TOTAL_SEATS = 6;
+const BASE_FARES = {
+  standard: 500,
+  premium: 1000,
+};
 
-// Book standard/premium ride
+const PER_MINUTE = 22;
+const PER_KM = 149;
+
+const normalizeAddress = (addr) =>
+  addr
+    .trim()
+    .split(" ")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(" ");
+
 const bookRide = async (req, res) => {
   try {
-    const {
-      driverId,
-      pickup,
-      destination,
-      rideType,
-      passengerName,
-      basePrice,
-    } = req.body;
+    let { pickup, destination, rideType, passengerName } = req.body;
 
-    if (
-      !driverId ||
-      !pickup ||
-      !destination ||
-      !rideType ||
-      !passengerName ||
-      !basePrice
-    ) {
+    // Validate inputs
+    if (!pickup || !destination || !rideType || !passengerName) {
       return res.status(400).json({
         success: false,
         message: "All fields are required",
       });
     }
 
+    if (!["standard", "premium"].includes(rideType)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid ride type",
+      });
+    }
+
+    // Normalize addresses
+    pickup = normalizeAddress(pickup);
+    destination = normalizeAddress(destination);
+
+    // Google Directions API
+    const directionsURL = `https://maps.googleapis.com/maps/api/directions/json?origin=${encodeURIComponent(
+      pickup
+    )}&destination=${encodeURIComponent(destination)}&key=${
+      process.env.GOOGLE_MAPS_API_KEY
+    }`;
+
+    const mapRes = await axios.get(directionsURL);
+
+    if (mapRes.data.status !== "OK") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid route. Please check pickup and destination.",
+        details: mapRes.data,
+      });
+    }
+
+    const leg = mapRes.data.routes[0].legs[0];
+    const distanceKm = leg.distance.value / 1000; // meters → km
+    const durationMin = leg.duration.value / 60; // sec → min
+
+    // Optional: reject extremely long routes (>500km)
+    if (distanceKm > 500) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Route is too long. Please select locations within reasonable driving distance.",
+      });
+    }
+
+    const baseFare = BASE_FARES[rideType];
+    let totalFare = baseFare + distanceKm * PER_KM + durationMin * PER_MINUTE;
+
+    // Minimum fares
+    if (rideType === "standard") totalFare = Math.max(totalFare, 1500);
+    if (rideType === "premium") totalFare = Math.max(totalFare, 2500);
+
+    const pickupEta =
+      rideType === "premium"
+        ? Math.floor(Math.random() * 3) + 2
+        : Math.floor(Math.random() * 4) + 5;
+
+    const driverId = null;
+
     const newRide = new Ride({
       driver: driverId,
       pickup,
       destination,
-      rideType,
       passengerName,
-      basePrice,
-      status: "available",
+      rideType,
+      status: "requested", // must match your schema enum
+      fare: Math.floor(totalFare),
+      basePrice: baseFare, // number, not object
+      distance: distanceKm,
+      duration: durationMin,
+      pickupEta,
     });
 
     const savedRide = await newRide.save();
@@ -236,14 +297,12 @@ const joinRide = async (req, res) => {
       });
     }
 
-    // add passenger (guest or logged-in)
     room.passengers.push({
       id: idToUse,
       name: nameToUse,
       seats,
     });
 
-    // mark room as full if all seats are taken
     const totalSeatsTaken = room.passengers.reduce(
       (acc, p) => acc + p.seats,
       0

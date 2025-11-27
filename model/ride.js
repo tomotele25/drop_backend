@@ -56,13 +56,11 @@ const rideSchema = new mongoose.Schema({
     type: Number,
     required: true,
   },
-
   status: {
     type: String,
-    enum: ["available", "ongoing", "completed"],
-    default: "available",
+    enum: ["requested", "accepted", "completed", "cancelled"],
+    required: true,
   },
-
   createdAt: {
     type: Date,
     default: Date.now,
