@@ -39,11 +39,9 @@ const bookRide = async (req, res) => {
       });
     }
 
-    // Normalize addresses
     pickup = normalizeAddress(pickup);
     destination = normalizeAddress(destination);
 
-    // Google Directions API
     const directionsURL = `https://maps.googleapis.com/maps/api/directions/json?origin=${encodeURIComponent(
       pickup
     )}&destination=${encodeURIComponent(destination)}&key=${
@@ -61,10 +59,9 @@ const bookRide = async (req, res) => {
     }
 
     const leg = mapRes.data.routes[0].legs[0];
-    const distanceKm = leg.distance.value / 1000; // meters → km
-    const durationMin = leg.duration.value / 60; // sec → min
+    const distanceKm = leg.distance.value / 1000;
+    const durationMin = leg.duration.value / 60;
 
-    // Optional: reject extremely long routes (>500km)
     if (distanceKm > 500) {
       return res.status(400).json({
         success: false,
@@ -93,9 +90,9 @@ const bookRide = async (req, res) => {
       destination,
       passengerName,
       rideType,
-      status: "requested", // must match your schema enum
+      status: "requested",
       fare: Math.floor(totalFare),
-      basePrice: baseFare, // number, not object
+      basePrice: baseFare,
       distance: distanceKm,
       duration: durationMin,
       pickupEta,
@@ -117,12 +114,122 @@ const bookRide = async (req, res) => {
     });
   }
 };
+const getAutocompleteSuggestions = async (req, res) => {
+  try {
+    const { input } = req.body;
+    console.log(input);
+
+    if (!input) {
+      return res.status(400).json({ success: false, message: "Missing input" });
+    }
+
+    const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+
+    const response = await axios.get(
+      "https://maps.googleapis.com/maps/api/place/autocomplete/json",
+      {
+        params: {
+          input,
+          key: apiKey,
+          types: "address|establishment",
+          components: "country:ng",
+          strictbounds: true,
+          location: "9.0820,8.6753",
+          radius: 1000000,
+          sessiontoken: Date.now(),
+        },
+      }
+    );
+
+    const predictions = response.data.predictions.map((p) => ({
+      description: p.description,
+      place_id: p.place_id,
+    }));
+
+    res.status(200).json({ success: true, predictions });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+const getRouteAndRides = async (req, res) => {
+  try {
+    const { pickup, destination } = req.body;
+
+    if (!pickup || !destination) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Missing fields" });
+    }
+
+    const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+
+    const response = await axios.get(
+      "https://maps.googleapis.com/maps/api/directions/json",
+      {
+        params: {
+          origin: pickup,
+          destination: destination,
+          mode: "driving",
+          key: apiKey,
+        },
+      }
+    );
+
+    if (response.data.status !== "OK") {
+      return res.status(400).json({
+        success: false,
+        message: "Google Error: " + response.data.status,
+      });
+    }
+
+    const route = response.data.routes[0].legs[0];
+
+    const distanceMeters = route.distance.value;
+    const durationSeconds = route.duration.value;
+
+    const distanceKm = distanceMeters / 1000;
+    const durationMinutes = durationSeconds / 60;
+
+    const BASE_FARES = {
+      standard: 500,
+      premium: 1000,
+    };
+
+    const PER_KM = 149;
+    const PER_MINUTE = 22;
+
+    const calculateFare = (type) => {
+      const base = BASE_FARES[type];
+      const fare = base + distanceKm * PER_KM + durationMinutes * PER_MINUTE;
+      return Math.round(fare);
+    };
+
+    const fares = {
+      standard: calculateFare("standard"),
+      premium: calculateFare("premium"),
+    };
+
+    return res.json({
+      success: true,
+      distance: route.distance.text,
+      duration: route.duration.text,
+      distanceKm,
+      durationMinutes,
+      fares,
+    });
+  } catch (error) {
+    console.log(error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
 
 // Fetch available riders
 const getAvailableRider = async (req, res) => {
   try {
     const availableRiders = await Rider.find({ isActive: true }).select(
-      "fullname plateNo isActive carModel carColor"
+      "fullname plateNo isActive carModel carColor currentLocation"
     );
 
     return res.status(200).json({
@@ -378,5 +485,7 @@ module.exports = {
   getAvailableRider,
   createRide,
   getAvailableRooms,
+  getAutocompleteSuggestions,
   getRoomById,
+  getRouteAndRides,
 };

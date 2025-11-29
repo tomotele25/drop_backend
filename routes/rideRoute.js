@@ -5,6 +5,8 @@ const {
   joinRide,
   getAvailableRooms,
   getRoomById,
+  getRouteAndRides,
+  getAutocompleteSuggestions,
 } = require("../controller/rides");
 const express = require("express");
 
@@ -17,6 +19,10 @@ router.get("/availableRides", getAvailableRider);
 router.post("/createRoom", createRide);
 
 router.post("/joinRoom", joinRide);
+
+router.post("/autocomplete", getAutocompleteSuggestions);
+
+router.post("/route-and-rides", getRouteAndRides);
 
 router.get("/availableRooms", getAvailableRooms);
 
