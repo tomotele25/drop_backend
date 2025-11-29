@@ -131,12 +131,11 @@ const getAutocompleteSuggestions = async (req, res) => {
         params: {
           input,
           key: apiKey,
-          types: "address|establishment",
+          types: "address",
           components: "country:ng",
-          strictbounds: true,
           location: "9.0820,8.6753",
-          radius: 1000000,
-          sessiontoken: Date.now(),
+          radius: 500000,
+          sessiontoken: Math.random().toString(36).substr(2, 10),
         },
       }
     );
