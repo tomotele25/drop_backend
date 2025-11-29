@@ -131,7 +131,7 @@ const getAutocompleteSuggestions = async (req, res) => {
         params: {
           input,
           key: apiKey,
-          types: "address",
+          types: "(address)|(establishment)|(geocode)",
           components: "country:ng",
           location: "9.0820,8.6753",
           radius: 500000,
