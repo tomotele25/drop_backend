@@ -114,41 +114,85 @@ const bookRide = async (req, res) => {
     });
   }
 };
+
 const getAutocompleteSuggestions = async (req, res) => {
   try {
     const { input } = req.body;
-    console.log(input);
 
     if (!input) {
-      return res.status(400).json({ success: false, message: "Missing input" });
+      return res.status(400).json({
+        success: false,
+        message: "Missing input",
+      });
     }
 
     const apiKey = process.env.GOOGLE_MAPS_API_KEY;
 
-    const response = await axios.get(
+    // 1️⃣ AUTOCOMPLETE REQUEST
+    const autoRes = await axios.get(
       "https://maps.googleapis.com/maps/api/place/autocomplete/json",
       {
         params: {
           input,
           key: apiKey,
-          types: "geocode",
           components: "country:ng",
+          types: "geocode", // best for addresses + cities
           location: "9.0820,8.6753",
-          radius: 1000000,
-          sessiontoken: Date.now(),
+          radius: 50000,
         },
       }
     );
 
-    const predictions = response.data.predictions.map((p) => ({
+    let results = autoRes.data.predictions.map((p) => ({
       description: p.description,
       place_id: p.place_id,
+      source: "autocomplete",
     }));
 
-    res.status(200).json({ success: true, predictions });
+    // If Autocomplete returned enough, return it
+    if (results.length > 2) {
+      return res.status(200).json({
+        success: true,
+        predictions: results,
+      });
+    }
+
+    // 2️⃣ TEXT SEARCH (FALLBACK)
+    const textSearchRes = await axios.get(
+      "https://maps.googleapis.com/maps/api/place/textsearch/json",
+      {
+        params: {
+          query: input,
+          key: apiKey,
+        },
+      }
+    );
+
+    const textResults = textSearchRes.data.results.map((p) => ({
+      description: p.name,
+      place_id: p.place_id,
+      source: "textsearch",
+    }));
+
+    // MERGE BOTH (remove duplicates)
+    const combined = [
+      ...results,
+      ...textResults.filter(
+        (t) => !results.some((a) => a.place_id === t.place_id)
+      ),
+    ];
+
+    return res.status(200).json({
+      success: true,
+      predictions: combined,
+    });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: "Server error" });
+    console.error("Autocomplete Error:", err);
+
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
   }
 };
 
