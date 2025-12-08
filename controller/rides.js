@@ -5,105 +5,124 @@ const Room = require("../model/room");
 const axios = require("axios");
 
 const TOTAL_SEATS = 6;
-const BASE_FARES = {
-  standard: 500,
-  premium: 1000,
-};
 
-const PER_MINUTE = 22;
-const PER_KM = 149;
+const hardcodedRiders = [
+  {
+    _id: "68f02dfc688c8a83133b72fd",
+    fullname: "David Awosanya",
+    carModel: "Lexus ES350",
+    carColor: "Blue",
+    plateNo: "456FgyW",
+    isAvailable: true,
+    location: { type: "Point", coordinates: [3.4363, 7.2244] }, // [lng, lat]
+  },
+];
 
-const normalizeAddress = (addr) =>
-  addr
-    .trim()
-    .split(" ")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-    .join(" ");
+// Utility to calculate distance in meters between two coordinates
+function getDistance(lat1, lng1, lat2, lng2) {
+  const toRad = (v) => (v * Math.PI) / 180;
+  const R = 6371e3; // Earth radius in meters
+  const φ1 = toRad(lat1),
+    φ2 = toRad(lat2);
+  const Δφ = toRad(lat2 - lat1),
+    Δλ = toRad(lng2 - lng1);
+
+  const a =
+    Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return R * c; // meters
+}
 
 const bookRide = async (req, res) => {
   try {
-    let { pickup, destination, rideType, passengerName } = req.body;
+    const {
+      pickup,
+      destination,
+      rideType,
+      passengerName,
+      fare,
+      distance,
+      duration,
+    } = req.body;
 
-    // Validate inputs
-    if (!pickup || !destination || !rideType || !passengerName) {
-      return res.status(400).json({
-        success: false,
-        message: "All fields are required",
-      });
+    if (
+      !pickup ||
+      !destination ||
+      !rideType ||
+      !passengerName ||
+      !fare ||
+      !distance ||
+      !duration
+    ) {
+      return res
+        .status(400)
+        .json({ success: false, message: "All fields are required" });
     }
 
-    if (!["standard", "premium"].includes(rideType)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid ride type",
-      });
+    if (!["standard", "premium"].includes(rideType.toLowerCase())) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid ride type" });
     }
 
-    pickup = normalizeAddress(pickup);
-    destination = normalizeAddress(destination);
-
-    const directionsURL = `https://maps.googleapis.com/maps/api/directions/json?origin=${encodeURIComponent(
+    // --- Convert pickup address to coordinates ---
+    const geocodeURL = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(
       pickup
-    )}&destination=${encodeURIComponent(destination)}&key=${
-      process.env.GOOGLE_MAPS_API_KEY
-    }`;
+    )}&key=${process.env.GOOGLE_MAPS_API_KEY}`;
 
-    const mapRes = await axios.get(directionsURL);
+    const geoRes = await axios.get(geocodeURL);
+    if (!geoRes.data.results.length)
+      throw new Error("Unable to geocode pickup address");
 
-    if (mapRes.data.status !== "OK") {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid route. Please check pickup and destination.",
-        details: mapRes.data,
-      });
+    const [pickupLat, pickupLng] = [
+      geoRes.data.results[0].geometry.location.lat,
+      geoRes.data.results[0].geometry.location.lng,
+    ];
+
+    // --- Find nearby drivers with dynamic radius ---
+    let radius = 5000; // 5 km
+    let nearbyDrivers = [];
+    while (radius <= 20000 && nearbyDrivers.length === 0) {
+      nearbyDrivers = hardcodedRiders.filter(
+        (r) =>
+          r.isAvailable &&
+          getDistance(
+            pickupLat,
+            pickupLng,
+            r.location.coordinates[1],
+            r.location.coordinates[0]
+          ) <= radius
+      );
+      radius += 5000; // expand by 5 km
     }
 
-    const leg = mapRes.data.routes[0].legs[0];
-    const distanceKm = leg.distance.value / 1000;
-    const durationMin = leg.duration.value / 60;
+    const driver = nearbyDrivers.length > 0 ? nearbyDrivers[0] : null;
+    const driverId = driver ? driver._id : null;
 
-    if (distanceKm > 500) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Route is too long. Please select locations within reasonable driving distance.",
-      });
-    }
-
-    const baseFare = BASE_FARES[rideType];
-    let totalFare = baseFare + distanceKm * PER_KM + durationMin * PER_MINUTE;
-
-    // Minimum fares
-    if (rideType === "standard") totalFare = Math.max(totalFare, 1500);
-    if (rideType === "premium") totalFare = Math.max(totalFare, 2500);
-
-    const pickupEta =
-      rideType === "premium"
-        ? Math.floor(Math.random() * 3) + 2
-        : Math.floor(Math.random() * 4) + 5;
-
-    const driverId = null;
-
+    // --- Create Ride ---
     const newRide = new Ride({
       driver: driverId,
       pickup,
       destination,
       passengerName,
       rideType,
-      status: "requested",
-      fare: Math.floor(totalFare),
-      basePrice: baseFare,
-      distance: distanceKm,
-      duration: durationMin,
-      pickupEta,
+      status: driverId ? "assigned" : "requested",
+      fare: Number(fare),
+      distance: Number(distance),
+      duration: Number(duration),
+      pickupCoordinates: { type: "Point", coordinates: [pickupLng, pickupLat] },
     });
 
     const savedRide = await newRide.save();
 
     return res.status(200).json({
       success: true,
-      message: "Ride booked successfully",
+      message: driverId
+        ? "Ride booked and driver assigned!"
+        : "Ride booked, waiting for driver",
       ride: savedRide,
+      assignedDriver: driver || null,
     });
   } catch (error) {
     console.error("Error booking ride:", error);
@@ -117,7 +136,7 @@ const bookRide = async (req, res) => {
 
 const getAutocompleteSuggestions = async (req, res) => {
   try {
-    const { input } = req.body;
+    const { input, locationContext } = req.body;
 
     if (!input) {
       return res.status(400).json({
@@ -128,17 +147,35 @@ const getAutocompleteSuggestions = async (req, res) => {
 
     const apiKey = process.env.GOOGLE_MAPS_API_KEY;
 
+    let locationBias = null;
+    if (locationContext) {
+      const geoRes = await axios.get(
+        "https://maps.googleapis.com/maps/api/geocode/json",
+        {
+          params: {
+            address: locationContext,
+            key: apiKey,
+          },
+        }
+      );
+
+      if (geoRes.data.results.length > 0) {
+        const { lat, lng } = geoRes.data.results[0].geometry.location;
+        locationBias = `${lat},${lng}`;
+      }
+    }
+
     // 1️⃣ AUTOCOMPLETE REQUEST
     const autoRes = await axios.get(
       "https://maps.googleapis.com/maps/api/place/autocomplete/json",
       {
         params: {
-          input,
+          input: locationContext ? `${input}, ${locationContext}` : input,
           key: apiKey,
           components: "country:ng",
-          types: "geocode", // best for addresses + cities
-          location: "9.0820,8.6753",
-          radius: 50000,
+          types: "geocode",
+          location: locationBias || "9.0820,8.6753", // default Nigeria center
+          radius: 50000, // 50 km
         },
       }
     );
@@ -162,7 +199,7 @@ const getAutocompleteSuggestions = async (req, res) => {
       "https://maps.googleapis.com/maps/api/place/textsearch/json",
       {
         params: {
-          query: input,
+          query: locationContext ? `${input}, ${locationContext}` : input,
           key: apiKey,
         },
       }
@@ -501,6 +538,94 @@ const getAvailableRooms = async (req, res) => {
   }
 };
 
+const getRideById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: "Ride ID is required",
+      });
+    }
+
+    const ride = await Ride.findById(id);
+    if (!ride) {
+      return res.status(404).json({
+        success: false,
+        message: "Ride not found",
+      });
+    }
+
+    // 🔹 INLINE geocoding (no external function)
+    const geocode = async (address) => {
+      try {
+        const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(
+          address
+        )}&key=${process.env.GOOGLE_MAPS_API_KEY}`;
+
+        const response = await axios.get(url);
+
+        if (response.data.status === "OK" && response.data.results.length > 0) {
+          return response.data.results[0].geometry.location; // { lat, lng }
+        }
+
+        return null;
+      } catch (err) {
+        console.error("Geocode error:", err);
+        return null;
+      }
+    };
+
+    // 🌍 Convert pickup & destination to lat/lng
+    const pickupCoords = await geocode(ride.pickup);
+    const destinationCoords = await geocode(ride.destination);
+
+    return res.status(200).json({
+      success: true,
+      message: "Ride found successfully",
+      ride,
+      pickupCoords,
+      destinationCoords,
+    });
+  } catch (error) {
+    console.error("Error fetching ride:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error fetching ride",
+    });
+  }
+};
+
+const getRiderById = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const rider = await Rider.findById(id).select(
+      "fullname carModel carColor plateNo currentLocation phone"
+    );
+
+    if (!rider) {
+      return res.status(404).json({
+        success: false,
+        message: "Rider not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Rider fetched successfully",
+      rider,
+    });
+  } catch (error) {
+    console.error("Error fetching rider:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error fetching rider",
+      error: error.message,
+    });
+  }
+};
+
 // Get a room by ID
 const getRoomById = async (req, res) => {
   try {
@@ -530,5 +655,7 @@ module.exports = {
   getAvailableRooms,
   getAutocompleteSuggestions,
   getRoomById,
+  getRiderById,
   getRouteAndRides,
+  getRideById,
 };

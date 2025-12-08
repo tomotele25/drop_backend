@@ -19,7 +19,7 @@ const rideSchema = new mongoose.Schema({
 
   rideType: {
     type: String,
-    enum: ["standard", "premium", "shared"],
+    enum: ["Standard", "Premium", "Shared"],
     default: "standard",
   },
 
@@ -54,11 +54,11 @@ const rideSchema = new mongoose.Schema({
 
   basePrice: {
     type: Number,
-    required: true,
+    required: false,
   },
   status: {
     type: String,
-    enum: ["requested", "accepted", "completed", "cancelled"],
+    enum: ["requested", "assigned", "accepted", "completed", "cancelled"],
     required: true,
   },
   createdAt: {
