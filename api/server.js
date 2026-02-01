@@ -14,7 +14,7 @@ const riderRoute = require("../routes/riderRoute");
 const Ride = require("../model/ride");
 const Rider = require("../model/rider");
 
-const PORT = process.env.PORT || 8001;
+const PORT = 8001;
 const app = express();
 
 // ================= CORS =================
