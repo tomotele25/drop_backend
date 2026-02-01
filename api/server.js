@@ -18,7 +18,11 @@ const PORT = process.env.PORT || 8001;
 const app = express();
 
 // ================= CORS =================
-const allowedOrigins = ["http://localhost:3000", "http://localhost:3001"];
+const allowedOrigins = [
+  "http://localhost:3000",
+  "http://localhost:3001",
+  "https://drop-red.vercel.app/",
+];
 app.use(
   cors({
     origin: (origin, cb) => {
