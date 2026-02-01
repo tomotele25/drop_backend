@@ -1,10 +1,6 @@
 const {
   bookRide,
   getAvailableRider,
-  createRide,
-  joinRide,
-  getAvailableRooms,
-  getRoomById,
   getRouteAndRides,
   getRideById,
   getRiderById,
@@ -22,15 +18,10 @@ router.get("/availableRides", getAvailableRider);
 
 router.get("/rider/:id", getRiderById);
 
-router.post("/createRoom", createRide);
 
-router.post("/joinRoom", joinRide);
 
 router.post("/autocomplete", getAutocompleteSuggestions);
 
 router.post("/route-and-rides", getRouteAndRides);
 
-router.get("/availableRooms", getAvailableRooms);
-
-router.get("/room/:id", getRoomById);
 module.exports = router;

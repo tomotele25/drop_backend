@@ -16,6 +16,14 @@ const rideSchema = new mongoose.Schema({
     required: true,
     trim: true,
   },
+  pickupCoordinates: {
+    lat: { type: Number },
+    lng: { type: Number },
+  },
+  destinationCoordinates: {
+    lat: { type: Number },
+    lng: { type: Number },
+  },
 
   rideType: {
     type: String,
@@ -58,8 +66,8 @@ const rideSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ["requested", "assigned", "accepted", "completed", "cancelled"],
-    required: true,
+    enum: ["requested", "assigned", "ongoing", "completed", "cancelled"],
+    default: "requested",
   },
   createdAt: {
     type: Date,

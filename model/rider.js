@@ -2,70 +2,32 @@ const mongoose = require("mongoose");
 const bcrypt = require("bcrypt");
 const slugify = require("slugify");
 
+const locationSchema = new mongoose.Schema(
+  {
+    latitude: { type: Number, default: 0 },
+    longitude: { type: Number, default: 0 },
+  },
+  { _id: false }
+);
+
 const riderSchema = new mongoose.Schema(
   {
-    fullname: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-    slug: {
-      type: String,
-      unique: true,
-      index: true,
-    },
-    email: {
-      type: String,
-      required: true,
-      unique: true,
-      lowercase: true,
-      trim: true,
-    },
-    password: {
-      type: String,
-      required: true,
-      minlength: 6,
-    },
-    carColor: {
-      type: String,
-      required: true,
-    },
-    carModel: {
-      type: String,
-      required: true,
-    },
-    user: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-    },
-    plateNo: {
-      type: String,
-      required: true,
-      unique: true,
-    },
-    profileImg: {
-      type: String,
-      default: "",
-    },
-    contact: {
-      type: String,
-      required: true,
-    },
-    isActive: {
-      type: Boolean,
-      default: false,
-    },
-    currentLocation: {
-      latitude: { type: Number, default: 0 },
-      longitude: { type: Number, default: 0 },
-      address: { type: String },
-    },
-    trips: [
-      {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "Trip",
-      },
-    ],
+    fullname: { type: String, required: true },
+    email: { type: String, required: true, unique: true, lowercase: true },
+    carColor: { type: String, required: true },
+    carModel: { type: String, required: true },
+    plateNo: { type: String, required: true, unique: true },
+    profileImg: { type: String, default: "" },
+    contact: { type: String, required: true },
+    licenseNo: { type: String, required: true },
+    dob: { type: String, required: true },
+    address: { type: String, required: true },
+    emergencyContact: { type: String, required: true },
+    bvn: { type: String, required: true, select: false },
+    isActive: { type: Boolean, default: false },
+    user: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    trips: [{ type: mongoose.Schema.Types.ObjectId, ref: "Trip" }],
+    currentLocation: { type: locationSchema, default: () => ({}) },
   },
   { timestamps: true }
 );
