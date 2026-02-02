@@ -14,10 +14,10 @@ const riderRoute = require("../routes/riderRoute");
 const Ride = require("../model/ride");
 const Rider = require("../model/rider");
 
-const PORT = 8001;
 const app = express();
+const PORT = process.env.PORT || 8001;
 
-// ================= CORS =================
+// ================= ALLOWED ORIGINS =================
 const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:3001",
@@ -25,9 +25,10 @@ const allowedOrigins = [
   "https://drop-driver.vercel.app",
 ];
 
+// ================= EXPRESS CORS =================
 app.use(
   cors({
-    origin: function (origin, callback) {
+    origin(origin, callback) {
       if (!origin || allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
@@ -38,7 +39,6 @@ app.use(
   }),
 );
 
-
 // ================= MIDDLEWARE =================
 app.use(express.json());
 
@@ -48,15 +48,24 @@ app.use("/api", authRoute);
 app.use("/api", rideRoute);
 app.use("/api", riderRoute);
 
-// ================= SOCKET.IO =================
+// ================= HTTP SERVER =================
 const server = http.createServer(app);
+
+// ================= SOCKET.IO =================
 const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] },
+  transports: ["polling", "websocket"], // IMPORTANT for Render/Vercel
+  cors: {
+    origin: allowedOrigins,
+    methods: ["GET", "POST"],
+    credentials: true,
+  },
 });
 
 // ================= GLOBAL SOCKET MAPS =================
 const driverSockets = new Map(); // driverId -> socketId
 const riderSockets = new Map(); // riderId -> socketId
+const socketDrivers = new Map(); // socketId -> driverId
+const socketRiders = new Map(); // socketId -> riderId
 
 global.io = io;
 global.driverSockets = driverSockets;
@@ -64,61 +73,68 @@ global.riderSockets = riderSockets;
 
 // ================= SOCKET CONNECTION =================
 io.on("connection", (socket) => {
-  console.log("🔌 Connected:", socket.id);
+  console.log("🔌 Socket connected:", socket.id);
 
-  // ----- REGISTER DRIVER -----
-socket.on("registerDriver", async ({ driverId }) => {
-  if (!driverId) return;
+  // ---------- REGISTER DRIVER ----------
+  socket.on("registerDriver", async ({ driverId }) => {
+    if (!driverId) return;
 
-  // Save driver socket
-  driverSockets.set(driverId.toString(), socket.id);
-  console.log(`🚗 Driver registered: ${driverId} -> socket ${socket.id}`);
+    const dId = driverId.toString();
+    driverSockets.set(dId, socket.id);
+    socketDrivers.set(socket.id, dId);
 
-  // Send all pending rides
-  try {
-    const pendingRides = await Ride.find({
-      driver: driverId,
-      status: "requested",
-    });
-    pendingRides.forEach((ride) => {
-      io.to(socket.id).emit("rideAssigned", {
-        rideId: ride._id.toString(),
-        pickup: ride.pickup,
-        destination: ride.destination,
-        passengerName: ride.passengerName,
-        fare: ride.fare,
-        distance: ride.distance,
-        duration: ride.duration,
+    console.log(`🚗 Driver registered: ${dId}`);
+
+    // Send pending rides
+    try {
+      const pendingRides = await Ride.find({
+        driver: dId,
+        status: "requested",
       });
-      console.log(`🔔 Pending ride sent to driver ${driverId}`);
-    });
-  } catch (err) {
-    console.error("❌ Error sending pending rides:", err.message);
-  }
-});
 
-
-  // ----- REGISTER RIDER -----
-  socket.on("registerRider", ({ riderId }) => {
-    if (!riderId) return;
-    riderSockets.set(riderId.toString(), socket.id);
-    console.log(`🧍 Rider registered: ${riderId} -> socket ${socket.id}`);
+      pendingRides.forEach((ride) => {
+        io.to(socket.id).emit("rideAssigned", {
+          rideId: ride._id.toString(),
+          pickup: ride.pickup,
+          destination: ride.destination,
+          passengerName: ride.passengerName,
+          fare: ride.fare,
+          distance: ride.distance,
+          duration: ride.duration,
+        });
+      });
+    } catch (err) {
+      console.error("❌ Pending ride error:", err.message);
+    }
   });
 
-  // ----- DRIVER LOCATION UPDATE -----
+  // ---------- REGISTER RIDER ----------
+  socket.on("registerRider", ({ riderId }) => {
+    if (!riderId) return;
+
+    const rId = riderId.toString();
+    riderSockets.set(rId, socket.id);
+    socketRiders.set(socket.id, rId);
+
+    console.log(`🧍 Rider registered: ${rId}`);
+  });
+
+  // ---------- DRIVER LOCATION UPDATE ----------
   socket.on("driverLocation", async ({ driverId, lat, lng }) => {
     if (!driverId || lat == null || lng == null) return;
+
     try {
       await Rider.findByIdAndUpdate(driverId, {
         currentLocation: { latitude: lat, longitude: lng },
       });
+
       socket.broadcast.emit("locationUpdate", { driverId, lat, lng });
     } catch (err) {
       console.error("❌ Location update error:", err.message);
     }
   });
 
-  // ----- DRIVER ACCEPTS RIDE -----
+  // ---------- ACCEPT RIDE ----------
   socket.on("acceptRide", async ({ rideId, driverId }) => {
     try {
       const ride = await Ride.findOneAndUpdate(
@@ -134,8 +150,8 @@ socket.on("registerDriver", async ({ driverId }) => {
 
       console.log(`✅ Ride ${rideId} accepted by driver ${driverId}`);
 
-      // Notify rider if online
       const riderSocketId = riderSockets.get(ride.passengerId?.toString());
+
       if (riderSocketId) {
         io.to(riderSocketId).emit("rideAccepted", {
           rideId: ride._id.toString(),
@@ -149,32 +165,28 @@ socket.on("registerDriver", async ({ driverId }) => {
     }
   });
 
-  // ----- DRIVER REJECTS RIDE -----
+  // ---------- REJECT RIDE ----------
   socket.on("rejectRide", ({ rideId, driverId }) => {
     console.log(`❌ Driver ${driverId} rejected ride ${rideId}`);
     socket.emit("rideRejected", { rideId });
   });
 
-  // ----- DISCONNECT -----
+  // ---------- DISCONNECT ----------
   socket.on("disconnect", () => {
-    console.log("❌ Disconnected:", socket.id);
+    console.log("❌ Socket disconnected:", socket.id);
 
-    // Remove from driverSockets
-    for (const [id, sId] of driverSockets) {
-      if (sId === socket.id) {
-        driverSockets.delete(id);
-        console.log(`🚗 Driver removed: ${id}`);
-        break;
-      }
+    const driverId = socketDrivers.get(socket.id);
+    if (driverId) {
+      driverSockets.delete(driverId);
+      socketDrivers.delete(socket.id);
+      console.log(`🚗 Driver removed: ${driverId}`);
     }
 
-    // Remove from riderSockets
-    for (const [id, sId] of riderSockets) {
-      if (sId === socket.id) {
-        riderSockets.delete(id);
-        console.log(`🧍 Rider removed: ${id}`);
-        break;
-      }
+    const riderId = socketRiders.get(socket.id);
+    if (riderId) {
+      riderSockets.delete(riderId);
+      socketRiders.delete(socket.id);
+      console.log(`🧍 Rider removed: ${riderId}`);
     }
   });
 });
@@ -193,4 +205,5 @@ const startServer = async () => {
 };
 
 startServer();
+
 module.exports = app;
