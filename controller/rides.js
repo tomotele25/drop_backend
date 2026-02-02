@@ -4,11 +4,6 @@ const Ride = require("../model/ride");
 const Rider = require("../model/rider");
 const axios = require("axios");
 
-
-const axios = require("axios");
-const Ride = require("../models/Ride");
-const Rider = require("../models/Rider");
-
 /* ----------------------------------
    Helper: find nearest driver
 ---------------------------------- */
