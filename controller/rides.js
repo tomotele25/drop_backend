@@ -5,151 +5,193 @@ const Rider = require("../model/rider");
 const axios = require("axios");
 
 
-function getDistanceKm(lat1, lng1, lat2, lng2) {
-  const R = 6371; // Earth radius in km
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLng = ((lng2 - lng1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLng / 2) ** 2;
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
+const axios = require("axios");
+const Ride = require("../models/Ride");
+const Rider = require("../models/Rider");
+
+/* ----------------------------------
+   Helper: find nearest driver
+---------------------------------- */
+const findNearestDriver = async (pickupLoc, busyDriverIds) => {
+  const radii = [5000, 10000, 15000]; // meters
+
+  for (const radius of radii) {
+    const driver = await Rider.findOne({
+      isActive: true,
+      _id: { $nin: busyDriverIds },
+      currentLocation: {
+        $near: {
+          $geometry: {
+            type: "Point",
+            coordinates: [pickupLoc.lng, pickupLoc.lat],
+          },
+          $maxDistance: radius,
+        },
+      },
+    });
+
+    if (driver) {
+      return { driver, radius };
+    }
+  }
+
+  return null;
+};
 
 const bookRide = async (req, res) => {
   try {
-    const {
-      pickup,
-      destination,
-      rideType,
-      passengerName,
-      fare,
-      distance,
-      duration,
-    } = req.body;
+    const { pickup, destination, rideType, passengerName } = req.body;
 
-    // Validate required fields
-    if (!pickup || !destination || !rideType || !passengerName || !fare) {
-      return res
-        .status(400)
-        .json({ success: false, message: "All fields are required" });
+    if (!pickup || !destination || !rideType) {
+      return res.status(400).json({
+        success: false,
+        message: "Pickup, destination and ride type are required",
+      });
     }
 
-    // Convert pickup address to coordinates
+    /* ----------------------------------
+       1️⃣ GEOCODE PICKUP
+    ---------------------------------- */
     const pickupGeo = await axios.get(
       "https://maps.googleapis.com/maps/api/geocode/json",
-      { params: { address: pickup, key: process.env.GOOGLE_MAPS_API_KEY } },
+      {
+        params: {
+          address: pickup,
+          key: process.env.GOOGLE_MAPS_API_KEY,
+        },
+      },
     );
-    if (pickupGeo.data.status !== "OK" || !pickupGeo.data.results.length) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid pickup address" });
+
+    if (pickupGeo.data.status !== "OK") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid pickup address",
+      });
     }
+
     const pickupLoc = pickupGeo.data.results[0].geometry.location;
 
-    // Convert destination address to coordinates
+    /* ----------------------------------
+       2️⃣ GEOCODE DESTINATION
+    ---------------------------------- */
     const destinationGeo = await axios.get(
       "https://maps.googleapis.com/maps/api/geocode/json",
       {
-        params: { address: destination, key: process.env.GOOGLE_MAPS_API_KEY },
+        params: {
+          address: destination,
+          key: process.env.GOOGLE_MAPS_API_KEY,
+        },
       },
     );
-    if (
-      destinationGeo.data.status !== "OK" ||
-      !destinationGeo.data.results.length
-    ) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid destination address" });
+
+    if (destinationGeo.data.status !== "OK") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid destination address",
+      });
     }
+
     const destinationLoc = destinationGeo.data.results[0].geometry.location;
 
-    // Get all busy drivers
+    /* ----------------------------------
+       3️⃣ DIRECTIONS API (REAL ETA)
+    ---------------------------------- */
+    const directionsRes = await axios.get(
+      "https://maps.googleapis.com/maps/api/directions/json",
+      {
+        params: {
+          origin: `${pickupLoc.lat},${pickupLoc.lng}`,
+          destination: `${destinationLoc.lat},${destinationLoc.lng}`,
+          key: process.env.GOOGLE_MAPS_API_KEY,
+        },
+      },
+    );
+
+    if (directionsRes.data.status !== "OK") {
+      return res.status(400).json({
+        success: false,
+        message: "Unable to calculate route",
+      });
+    }
+
+    const leg = directionsRes.data.routes[0].legs[0];
+
+    const distance = Number((leg.distance.value / 1000).toFixed(2)); // km
+    const duration = Math.ceil(leg.duration.value / 60); // minutes
+
+    /* ----------------------------------
+       4️⃣ BASE PRICE CALCULATION
+    ---------------------------------- */
+    const BASE_FARE = 500; // ₦
+    const PRICE_PER_KM = 120;
+    const PRICE_PER_MIN = 20;
+
+    const basePrice =
+      BASE_FARE + distance * PRICE_PER_KM + duration * PRICE_PER_MIN;
+
+    /* ----------------------------------
+       5️⃣ BUSY DRIVERS
+    ---------------------------------- */
     const busyDriverIds = await Ride.find({
       status: { $in: ["assigned", "ongoing"] },
     }).distinct("driver");
 
-    // Get all active drivers not busy
-    const availableDrivers = await Rider.find({
-      isActive: true,
-      "currentLocation.latitude": { $ne: null },
-      "currentLocation.longitude": { $ne: null },
-      _id: { $nin: busyDriverIds },
-    });
+    /* ----------------------------------
+       6️⃣ FIND DRIVER (5km → 10km → 15km)
+    ---------------------------------- */
+    const result = await findNearestDriver(pickupLoc, busyDriverIds);
 
-    if (!availableDrivers.length) {
-      return res
-        .status(400)
-        .json({ success: false, message: "No drivers available" });
+    if (!result) {
+      return res.status(400).json({
+        success: false,
+        message: "No drivers available nearby",
+      });
     }
 
-    // Find closest driver
-    let closestDriver = null;
-    let minDistance = Infinity;
-    for (const driver of availableDrivers) {
-      const d = getDistanceKm(
-        pickupLoc.lat,
-        pickupLoc.lng,
-        driver.currentLocation.latitude,
-        driver.currentLocation.longitude,
-      );
-      if (d < minDistance) {
-        minDistance = d;
-        closestDriver = driver;
-      }
-    }
+    const { driver, radius } = result;
 
-    if (!closestDriver) {
-      return res
-        .status(400)
-        .json({ success: false, message: "No drivers available nearby" });
-    }
-
-    // Create ride as REQUESTED (driver has not accepted yet)
-    const newRide = await Ride.create({
+    /* ----------------------------------
+       7️⃣ CREATE RIDE (MODEL UNCHANGED)
+    ---------------------------------- */
+    const ride = await Ride.create({
+      driver: driver._id,
       pickup,
-      pickupCoordinates: pickupLoc,
       destination,
+      distance, // Number
+      duration, // Number
+      pickupCoordinates: pickupLoc,
       destinationCoordinates: destinationLoc,
       rideType,
       passengerName,
-      fare,
-      distance,
-      duration,
+      basePrice,
       status: "requested",
-      driver: closestDriver._id,
     });
 
-    // Try sending ride notification if driver is online
-    const driverIdStr = closestDriver._id.toString();
-    const socketId = global.driverSockets?.get(driverIdStr);
+    /* ----------------------------------
+       8️⃣ SOCKET NOTIFICATION
+    ---------------------------------- */
+    const socketId = global.driverSockets?.get(driver._id.toString());
 
     if (socketId) {
       global.io.to(socketId).emit("rideAssigned", {
-        rideId: newRide._id.toString(),
+        rideId: ride._id,
         pickup,
         destination,
+        distance: `${distance} km`,
+        duration: `${duration} mins`,
+        basePrice,
         passengerName,
-        fare,
-        distance,
-        duration,
+        searchRadiusKm: radius / 1000,
       });
-      console.log(`🔔 Ride notification sent to driver ${driverIdStr}`);
-    } else {
-      console.log(
-        `⚠️ Driver ${driverIdStr} not connected. Ride will be sent when they connect.`,
-      );
     }
 
     return res.status(200).json({
       success: true,
-      message: "Ride booked and assigned to closest driver",
-      ride: newRide,
+      message: "Ride booked successfully",
+      ride,
     });
   } catch (error) {
-    console.error("Error booking ride:", error);
+    console.error("Ride booking error:", error);
     return res.status(500).json({
       success: false,
       message: "Server error booking ride",
@@ -157,7 +199,6 @@ const bookRide = async (req, res) => {
     });
   }
 };
-
 
 // ================= AUTOCOMPLETE =================
 const getAutocompleteSuggestions = async (req, res) => {
