@@ -8,7 +8,7 @@ const axios = require("axios");
 
 const getDistanceKm = (lat1, lng1, lat2, lng2) => {
   const toRad = (v) => (v * Math.PI) / 180;
-  const R = 6371; 
+  const R = 6371;
 
   const dLat = toRad(lat2 - lat1);
   const dLng = toRad(lng2 - lng1);
@@ -20,41 +20,34 @@ const getDistanceKm = (lat1, lng1, lat2, lng2) => {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 };
 
+const normalize = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+
 const findNearestDriver = (pickupLoc, drivers) => {
-  const radii = [5, 10, 15]; // km
+  let closestDriver = null;
+  let minDistance = Infinity;
 
-  for (const radius of radii) {
-    let closest = null;
-    let minDist = Infinity;
+  for (const driver of drivers) {
+    const lat = normalize(driver.currentLocation?.latitude);
+    const lng = normalize(driver.currentLocation?.longitude);
 
-    for (const driver of drivers) {
-      if (
-        !driver.currentLocation ||
-        driver.currentLocation.lat == null ||
-        driver.currentLocation.lng == null
-      )
-        continue;
+    if (lat === null || lng === null) continue;
 
-      const dist = getDistanceKm(
-        pickupLoc.lat,
-        pickupLoc.lng,
-        driver.currentLocation.lat,
-        driver.currentLocation.lng,
-      );
+    const dist = getDistanceKm(pickupLoc.lat, pickupLoc.lng, lat, lng);
 
-      if (dist <= radius && dist < minDist) {
-        minDist = dist;
-        closest = driver;
-      }
-    }
+    console.log("📍 Driver:", driver.fullname, "→", dist.toFixed(2), "km");
 
-    if (closest) {
-      return { driver: closest, radius };
+    if (dist < minDistance) {
+      minDistance = dist;
+      closestDriver = driver;
     }
   }
 
-  return null;
+  return closestDriver; // ✅ RETURN DRIVER ONLY
 };
+
 
 const bookRide = async (req, res) => {
   try {
@@ -67,7 +60,7 @@ const bookRide = async (req, res) => {
       });
     }
 
-    /* ---------------- GEOCODE PICKUP ---------------- */
+    /* ---------- GEOCODE PICKUP ---------- */
     const pickupGeo = await axios.get(
       "https://maps.googleapis.com/maps/api/geocode/json",
       {
@@ -79,14 +72,15 @@ const bookRide = async (req, res) => {
     );
 
     if (pickupGeo.data.status !== "OK") {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid pickup address" });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid pickup address",
+      });
     }
 
     const pickupLoc = pickupGeo.data.results[0].geometry.location;
 
-    /* ---------------- GEOCODE DESTINATION ---------------- */
+    /* ---------- GEOCODE DESTINATION ---------- */
     const destinationGeo = await axios.get(
       "https://maps.googleapis.com/maps/api/geocode/json",
       {
@@ -98,14 +92,15 @@ const bookRide = async (req, res) => {
     );
 
     if (destinationGeo.data.status !== "OK") {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid destination address" });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid destination address",
+      });
     }
 
     const destinationLoc = destinationGeo.data.results[0].geometry.location;
 
-    /* ---------------- DIRECTIONS (REAL ETA) ---------------- */
+    /* ---------- DIRECTIONS (ETA) ---------- */
     const directionsRes = await axios.get(
       "https://maps.googleapis.com/maps/api/directions/json",
       {
@@ -118,17 +113,17 @@ const bookRide = async (req, res) => {
     );
 
     if (directionsRes.data.status !== "OK") {
-      return res
-        .status(400)
-        .json({ success: false, message: "Unable to calculate route" });
+      return res.status(400).json({
+        success: false,
+        message: "Unable to calculate route",
+      });
     }
 
     const leg = directionsRes.data.routes[0].legs[0];
-
     const distance = Number((leg.distance.value / 1000).toFixed(2)); // km
     const duration = Math.ceil(leg.duration.value / 60); // minutes
 
-    /* ---------------- PRICE ---------------- */
+    /* ---------- PRICE ---------- */
     const BASE_FARE = 500;
     const PRICE_PER_KM = 120;
     const PRICE_PER_MIN = 20;
@@ -136,30 +131,30 @@ const bookRide = async (req, res) => {
     const basePrice =
       BASE_FARE + distance * PRICE_PER_KM + duration * PRICE_PER_MIN;
 
-    /* ---------------- BUSY DRIVERS ---------------- */
+    /* ---------- BUSY DRIVERS ---------- */
     const busyDriverIds = await Ride.find({
-      status: { $in: ["assigned", "ongoing"] },
+      status: "ongoing", // ✅ safer than assigned+ongoing
     }).distinct("driver");
 
-    /* ---------------- AVAILABLE DRIVERS ---------------- */
+    /* ---------- AVAILABLE DRIVERS ---------- */
     const availableDrivers = await Rider.find({
       isActive: true,
       _id: { $nin: busyDriverIds },
     });
 
-    /* ---------------- FIND NEAREST DRIVER ---------------- */
-    const result = findNearestDriver(pickupLoc, availableDrivers);
+    console.log("AVAILABLE DRIVERS:", availableDrivers.length);
 
-    if (!result) {
+    /* ---------- FIND NEAREST DRIVER ---------- */
+    const driver = findNearestDriver(pickupLoc, availableDrivers);
+
+    if (!driver) {
       return res.status(400).json({
         success: false,
         message: "No drivers available nearby",
       });
     }
 
-    const { driver, radius } = result;
-
-    /* ---------------- CREATE RIDE ---------------- */
+    /* ---------- CREATE RIDE ---------- */
     const ride = await Ride.create({
       driver: driver._id,
       pickup,
@@ -174,7 +169,7 @@ const bookRide = async (req, res) => {
       status: "requested",
     });
 
-    /* ---------------- SOCKET ---------------- */
+    /* ---------- SOCKET ---------- */
     const socketId = global.driverSockets?.get(driver._id.toString());
 
     if (socketId) {
@@ -182,11 +177,10 @@ const bookRide = async (req, res) => {
         rideId: ride._id,
         pickup,
         destination,
-        distance: `${distance} km`,
-        duration: `${duration} mins`,
-        basePrice,
+        distance, // number (km)
+        duration, // number (minutes)
+        fare: basePrice,
         passengerName,
-        searchRadiusKm: radius,
       });
     }
 
@@ -204,6 +198,7 @@ const bookRide = async (req, res) => {
     });
   }
 };
+
 
 // ================= AUTOCOMPLETE =================
 const getAutocompleteSuggestions = async (req, res) => {
