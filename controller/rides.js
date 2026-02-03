@@ -165,7 +165,7 @@ const bookRide = async (req, res) => {
       destinationCoordinates: destinationLoc,
       rideType,
       passengerName,
-      basePrice,
+      fare:basePrice,
       status: "requested",
     });
 
