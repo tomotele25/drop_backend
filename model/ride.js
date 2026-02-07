@@ -37,7 +37,7 @@ const rideSchema = new mongoose.Schema({
   rideType: {
     type: String,
     enum: ["Standard", "Premium", "Shared"],
-    default: "standard",
+    default: "Standard",
   },
 
   totalSeats: {
@@ -71,7 +71,7 @@ const rideSchema = new mongoose.Schema({
 
   basePrice: {
     type: Number,
-    required: false,
+    required: true,
   },
   status: {
     type: String,

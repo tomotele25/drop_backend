@@ -165,6 +165,67 @@ io.on("connection", (socket) => {
     }
   });
 
+  
+  // ---------- DRIVER ARRIVED AT PICKUP ----------
+  socket.on("arrivedAtPickup", async ({ rideId, driverId }) => {
+    try {
+      const ride = await Ride.findOneAndUpdate(
+        { _id: rideId, status: "assigned", driver: driverId },
+        { status: "ongoing" },
+        { new: true },
+      );
+
+      if (!ride)
+        return socket.emit("invalidAction", {
+          message: "Ride not in assigned status",
+        });
+
+      console.log(`🚦 Driver ${driverId} arrived at pickup for ride ${rideId}`);
+
+      // Notify rider
+      const riderSocketId = riderSockets.get(ride.passengerId?.toString());
+      if (riderSocketId) {
+        io.to(riderSocketId).emit("rideOngoing", {
+          rideId: ride._id.toString(),
+          driverId,
+        });
+      }
+
+      // Confirm to driver
+      socket.emit("pickupConfirmed", { ride });
+    } catch (err) {
+      console.error("❌ Arrived at pickup error:", err.message);
+    }
+  });
+
+  // ---------- END TRIP ----------
+  socket.on("endTrip", async ({ rideId, driverId }) => {
+    try {
+      const ride = await Ride.findOneAndUpdate(
+        { _id: rideId, status: "ongoing", driver: driverId },
+        { status: "completed" },
+        { new: true },
+      );
+
+      if (!ride)
+        return socket.emit("invalidAction", { message: "Ride not ongoing" });
+
+      console.log(`🏁 Ride ${rideId} completed by driver ${driverId}`);
+
+      const riderSocketId = riderSockets.get(ride.passengerId?.toString());
+      if (riderSocketId) {
+        io.to(riderSocketId).emit("rideCompleted", {
+          rideId: ride._id.toString(),
+          driverId,
+        });
+      }
+
+      socket.emit("tripEnded", { ride });
+    } catch (err) {
+      console.error("❌ End trip error:", err.message);
+    }
+  });
+
   // ---------- REJECT RIDE ----------
   socket.on("rejectRide", ({ rideId, driverId }) => {
     console.log(`❌ Driver ${driverId} rejected ride ${rideId}`);

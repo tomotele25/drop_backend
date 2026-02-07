@@ -129,9 +129,10 @@ const login = async (req, res) => {
   const accessToken = jwt.sign(
     {
       id: user._id,
-      role: user.role,
-      ...(riderData.riderId && { riderId: riderData.riderId }),
-    },
+     
+    },{
+    expiresIn: "2d",
+  },
     process.env.JWT_SECRET,
     { expiresIn: "2d" },
   );

@@ -1,5 +1,6 @@
 require("dotenv").config();
 
+const ride = require("../model/ride");
 const Ride = require("../model/ride");
 const Rider = require("../model/rider");
 const axios = require("axios");
@@ -48,10 +49,9 @@ const findNearestDriver = (pickupLoc, drivers) => {
   return closestDriver; // ✅ RETURN DRIVER ONLY
 };
 
-
 const bookRide = async (req, res) => {
   try {
-    const { pickup, destination, rideType, passengerName } = req.body;
+    const { pickup, destination, rideType, passengerName, fare } = req.body;
 
     if (!pickup || !destination || !rideType) {
       return res.status(400).json({
@@ -60,44 +60,36 @@ const bookRide = async (req, res) => {
       });
     }
 
+   
+    let basePrice = fare ? Number(fare) : 0;
+    if (isNaN(basePrice)) basePrice = 0;
+
     /* ---------- GEOCODE PICKUP ---------- */
     const pickupGeo = await axios.get(
       "https://maps.googleapis.com/maps/api/geocode/json",
-      {
-        params: {
-          address: pickup,
-          key: process.env.GOOGLE_MAPS_API_KEY,
-        },
-      },
+      { params: { address: pickup, key: process.env.GOOGLE_MAPS_API_KEY } },
     );
 
     if (pickupGeo.data.status !== "OK") {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid pickup address",
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid pickup address" });
     }
-
     const pickupLoc = pickupGeo.data.results[0].geometry.location;
 
     /* ---------- GEOCODE DESTINATION ---------- */
     const destinationGeo = await axios.get(
       "https://maps.googleapis.com/maps/api/geocode/json",
       {
-        params: {
-          address: destination,
-          key: process.env.GOOGLE_MAPS_API_KEY,
-        },
+        params: { address: destination, key: process.env.GOOGLE_MAPS_API_KEY },
       },
     );
 
     if (destinationGeo.data.status !== "OK") {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid destination address",
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid destination address" });
     }
-
     const destinationLoc = destinationGeo.data.results[0].geometry.location;
 
     /* ---------- DIRECTIONS (ETA) ---------- */
@@ -113,28 +105,31 @@ const bookRide = async (req, res) => {
     );
 
     if (directionsRes.data.status !== "OK") {
-      return res.status(400).json({
-        success: false,
-        message: "Unable to calculate route",
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "Unable to calculate route" });
     }
 
     const leg = directionsRes.data.routes[0].legs[0];
     const distance = Number((leg.distance.value / 1000).toFixed(2)); // km
     const duration = Math.ceil(leg.duration.value / 60); // minutes
 
-    /* ---------- PRICE ---------- */
-    const BASE_FARE = 500;
-    const PRICE_PER_KM = 120;
-    const PRICE_PER_MIN = 20;
+    /* ---------- Calculate basePrice if not provided ---------- */
+    if (basePrice === 0) {
+      const BASE_FARES = { standard: 500, premium: 1000 };
+      const PER_KM = 149;
+      const PER_MINUTE = 22;
 
-    const basePrice =
-      BASE_FARE + distance * PRICE_PER_KM + duration * PRICE_PER_MIN;
+      const typeKey = rideType.toLowerCase();
+      const fareCalc =
+        BASE_FARES[typeKey] + distance * PER_KM + duration * PER_MINUTE;
+      basePrice = Math.ceil(fareCalc / 50) * 50; // round up to nearest 50
+    }
 
     /* ---------- BUSY DRIVERS ---------- */
-    const busyDriverIds = await Ride.find({
-      status: "ongoing", // ✅ safer than assigned+ongoing
-    }).distinct("driver");
+    const busyDriverIds = await Ride.find({ status: "ongoing" }).distinct(
+      "driver",
+    );
 
     /* ---------- AVAILABLE DRIVERS ---------- */
     const availableDrivers = await Rider.find({
@@ -142,20 +137,22 @@ const bookRide = async (req, res) => {
       _id: { $nin: busyDriverIds },
     });
 
-    console.log("AVAILABLE DRIVERS:", availableDrivers.length);
+    if (availableDrivers.length === 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "No drivers available nearby" });
+    }
 
     /* ---------- FIND NEAREST DRIVER ---------- */
     const driver = findNearestDriver(pickupLoc, availableDrivers);
-
     if (!driver) {
-      return res.status(400).json({
-        success: false,
-        message: "No drivers available nearby",
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "No drivers available nearby" });
     }
 
     /* ---------- CREATE RIDE ---------- */
-    const ride = await Ride.create({
+    const rideData = {
       driver: driver._id,
       pickup,
       destination,
@@ -165,37 +162,39 @@ const bookRide = async (req, res) => {
       destinationCoordinates: destinationLoc,
       rideType,
       passengerName,
-      fare:basePrice,
+      basePrice,
       status: "requested",
-    });
+    };
+
+  
+    const ride = await Ride.create(rideData);
 
     /* ---------- SOCKET ---------- */
     const socketId = global.driverSockets?.get(driver._id.toString());
-
     if (socketId) {
       global.io.to(socketId).emit("rideAssigned", {
         rideId: ride._id,
         pickup,
         destination,
-        distance, // number (km)
-        duration, // number (minutes)
-        fare: basePrice,
+        distance,
+        duration,
+        basePrice: ride.basePrice,
         passengerName,
       });
     }
 
-    return res.status(200).json({
-      success: true,
-      message: "Ride booked successfully",
-      ride,
-    });
+    return res
+      .status(200)
+      .json({ success: true, message: "Ride booked successfully", ride });
   } catch (error) {
     console.error("Ride booking error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Server error booking ride",
-      error: error.message,
-    });
+    return res
+      .status(500)
+      .json({
+        success: false,
+        message: "Server error booking ride",
+        error: error.message,
+      });
   }
 };
 
@@ -380,6 +379,9 @@ const getRideById = async (req, res) => {
     res.status(200).json({
       success: true,
       ride,
+      driver:ride.driver,
+      pickup:ride.pickup,
+      destination:ride.destination,
       pickupCoords: ride.pickupCoordinates
         ? {
             lat: ride.pickupCoordinates.lat,
@@ -399,6 +401,28 @@ const getRideById = async (req, res) => {
   }
 };
 
+const getTotalRides = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!id) {
+      return res.status(404).json({ success: false, message: "Id not found" });
+    }
+
+  
+    const rides = await ride.find({ driver: id });
+
+    return res.status(200).json({
+      success: true,
+      message: "Rides found successfully",
+      rides,
+    });
+  } catch (error) {
+    console.error("Error fetching rides:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 
 module.exports = {
   bookRide,
@@ -407,4 +431,5 @@ module.exports = {
   getAvailableRider,
   getRiderById,
   getRideById,
+  getTotalRides
 };
