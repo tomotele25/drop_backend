@@ -9,7 +9,7 @@ const connectToDb = require("../database/db");
 const authRoute = require("../routes/authRoute");
 const rideRoute = require("../routes/rideRoute");
 const riderRoute = require("../routes/riderRoute");
-
+const percelRoute = require("../routes/percelRoute")
 // Models
 const Ride = require("../model/ride");
 const Rider = require("../model/rider");
@@ -47,6 +47,7 @@ app.get("/", (_, res) => res.send("🚀 Server is running"));
 app.use("/api", authRoute);
 app.use("/api", rideRoute);
 app.use("/api", riderRoute);
+app.use("/api", percelRoute);
 
 // ================= HTTP SERVER =================
 const server = http.createServer(app);

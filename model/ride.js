@@ -48,14 +48,6 @@ const rideSchema = new mongoose.Schema({
     type: Number,
     default: 4,
   },
-
-  passengerName: {
-    type: String,
-    required: function () {
-      return this.rideType !== "shared";
-    },
-  },
-
   passengers: [
     {
       name: {
