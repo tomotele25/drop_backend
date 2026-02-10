@@ -121,6 +121,7 @@ const login = async (req, res) => {
         if (rider) {
           riderData = {
             riderId: rider._id,
+            profileImg:rider.profileImg
           };
         }
       }

@@ -18,7 +18,6 @@ const createRider = async (req, res) => {
       licenseNo,
       emergencyContact,
       bvn,
-      profileImg,
       currentLocation,
     } = req.body;
 
@@ -51,7 +50,7 @@ const createRider = async (req, res) => {
         .json({ success: false, message: "Email already in use" });
 
     const hashedPassword = await bcrypt.hash(password, 10);
-
+ 
     const newUser = await User.create({
       fullname,
       email,
@@ -66,6 +65,15 @@ const createRider = async (req, res) => {
       longitude: Number(currentLocation?.longitude) || 0,
     };
 
+     const profileImg = req.file?.path || null;
+
+     if (!profileImg) {
+       return res.status(400).json({
+         success: false,
+         message: "Profile image is required",
+       });
+     }
+
     const newRider = await Rider.create({
       fullname,
       email,
@@ -78,6 +86,7 @@ const createRider = async (req, res) => {
       dob,
       address,
       emergencyContact,
+      profileImg,
       bvn,
       user: newUser._id,
       currentLocation: location,
