@@ -187,7 +187,7 @@ const bookRide = async (req, res) => {
         distance,
         duration,
         fare: ride.basePrice,
-        passengerName: passengers[0].name, // primary passenger
+        passengerName: ride.passengers[0].name, // primary passenger
       });
     }
 
