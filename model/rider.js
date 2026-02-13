@@ -7,7 +7,7 @@ const locationSchema = new mongoose.Schema(
     latitude: { type: Number, default: 0 },
     longitude: { type: Number, default: 0 },
   },
-  { _id: false }
+  { _id: false },
 );
 
 const riderSchema = new mongoose.Schema(
@@ -20,17 +20,21 @@ const riderSchema = new mongoose.Schema(
     profileImg: { type: String, default: "" },
     contact: { type: String, required: true },
     licenseNo: { type: String, required: true },
-    dob: { type: String, required: true },
+    dob: { type: String, required: false },
     address: { type: String, required: true },
     emergencyContact: { type: String, required: true },
     bvn: { type: String, required: true, select: false },
     isActive: { type: Boolean, default: false },
-    user: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     trips: [{ type: mongoose.Schema.Types.ObjectId, ref: "Trip" }],
     currentLocation: { type: locationSchema, default: () => ({}) },
+
+    // <-- Add this
+    slug: { type: String, unique: true },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
+
 
 riderSchema.pre("save", async function (next) {
   if (!this.isModified("fullname")) return next();
@@ -49,4 +53,4 @@ riderSchema.pre("save", async function (next) {
   next();
 });
 
-module.exports = mongoose.models.Rider || mongoose.model("Rider", riderSchema);
+module.exports = mongoose.model("Rider", riderSchema);

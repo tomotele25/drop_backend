@@ -9,7 +9,8 @@ const connectToDb = require("../database/db");
 const authRoute = require("../routes/authRoute");
 const rideRoute = require("../routes/rideRoute");
 const riderRoute = require("../routes/riderRoute");
-const percelRoute = require("../routes/percelRoute")
+const percelRoute = require("../routes/percelRoute");
+
 // Models
 const Ride = require("../model/ride");
 const Rider = require("../model/rider");
@@ -54,7 +55,7 @@ const server = http.createServer(app);
 
 // ================= SOCKET.IO =================
 const io = new Server(server, {
-  transports: ["polling", "websocket"], // IMPORTANT for Render/Vercel
+  transports: ["polling", "websocket"],
   cors: {
     origin: allowedOrigins,
     methods: ["GET", "POST"],
@@ -67,10 +68,12 @@ const driverSockets = new Map(); // driverId -> socketId
 const riderSockets = new Map(); // riderId -> socketId
 const socketDrivers = new Map(); // socketId -> driverId
 const socketRiders = new Map(); // socketId -> riderId
+const rideOffers = new Map(); // rideId -> { offeredAt, offeredTo: [driverIds], acceptedBy: driverId }
 
 global.io = io;
 global.driverSockets = driverSockets;
 global.riderSockets = riderSockets;
+global.rideOffers = rideOffers;
 
 // ================= SOCKET CONNECTION =================
 io.on("connection", (socket) => {
@@ -86,11 +89,11 @@ io.on("connection", (socket) => {
 
     console.log(`🚗 Driver registered: ${dId}`);
 
-    // Send pending rides
+    // Send pending rides assigned to this driver
     try {
       const pendingRides = await Ride.find({
         driver: dId,
-        status: "requested",
+        status: { $in: ["requested", "accepted", "arrived"] },
       });
 
       pendingRides.forEach((ride) => {
@@ -98,8 +101,8 @@ io.on("connection", (socket) => {
           rideId: ride._id.toString(),
           pickup: ride.pickup,
           destination: ride.destination,
-          passengerName: ride.passengerName,
-          fare: ride.fare,
+          passengerName: ride.passengers?.[0]?.name || "Passenger",
+          fare: ride.basePrice,
           distance: ride.distance,
           duration: ride.duration,
         });
@@ -135,67 +138,159 @@ io.on("connection", (socket) => {
     }
   });
 
-  // ---------- ACCEPT RIDE ----------
+  // ---------- ACCEPT RIDE (ATOMIC - Only one driver can accept) ----------
   socket.on("acceptRide", async ({ rideId, driverId }) => {
     try {
+      console.log(
+        `\n🚗 Driver ${driverId} attempting to accept ride ${rideId}`,
+      );
+
+      // ✅ ATOMIC UPDATE - Only one driver can match these conditions
       const ride = await Ride.findOneAndUpdate(
-        { _id: rideId, status: "requested" },
-        { status: "assigned", driver: driverId },
+        {
+          _id: rideId,
+          status: "pending",
+          driver: null,
+        },
+        {
+          status: "accepted",
+          driver: driverId,
+          acceptedAt: new Date(),
+        },
         { new: true },
       );
 
       if (!ride) {
-        socket.emit("rideTaken");
+        console.log(`⚠️ Ride ${rideId} already taken or invalid state`);
+        socket.emit("rideTaken", {
+          rideId,
+          message: "Sorry, another driver already accepted this ride",
+        });
         return;
       }
 
       console.log(`✅ Ride ${rideId} accepted by driver ${driverId}`);
 
-      const riderSocketId = riderSockets.get(ride.passengerId?.toString());
-
-      if (riderSocketId) {
-        io.to(riderSocketId).emit("rideAccepted", {
-          rideId: ride._id.toString(),
-          driverId,
-        });
+      // Update ride offer tracking
+      if (global.rideOffers.has(rideId)) {
+        global.rideOffers.get(rideId).acceptedBy = driverId;
       }
 
-      socket.emit("rideAccepted", { ride });
+      // ✅ Notify the accepting driver
+      socket.emit("rideAccepted", {
+        rideId: ride._id.toString(),
+        message: "Ride accepted successfully!",
+        ride,
+      });
+
+      // 📢 NOTIFY ALL OTHER DRIVERS - Ride is taken
+      console.log(`📢 Notifying other drivers that ride is taken...`);
+      const allDriverSockets = Array.from(driverSockets.values());
+      allDriverSockets.forEach((otherSocketId) => {
+        if (otherSocketId !== socket.id) {
+          io.to(otherSocketId).emit("rideTaken", {
+            rideId: rideId.toString(),
+            message: "This ride has been accepted by another driver",
+          });
+        }
+      });
+
+      // 📱 Notify the passenger (rider)
+      const passengerId = ride.passengers?.[0]?.userId;
+      if (passengerId) {
+        const riderSocketId = riderSockets.get(passengerId.toString());
+        if (riderSocketId) {
+          io.to(riderSocketId).emit("driverAccepted", {
+            rideId: ride._id.toString(),
+            driverId,
+            message: "A driver has accepted your ride!",
+          });
+        }
+      }
+
+      console.log("");
     } catch (err) {
       console.error("❌ Accept ride error:", err.message);
+      socket.emit("rideAcceptError", {
+        message: "Failed to accept ride",
+        error: err.message,
+      });
     }
   });
 
-  
   // ---------- DRIVER ARRIVED AT PICKUP ----------
   socket.on("arrivedAtPickup", async ({ rideId, driverId }) => {
     try {
       const ride = await Ride.findOneAndUpdate(
-        { _id: rideId, status: "assigned", driver: driverId },
-        { status: "ongoing" },
+        { _id: rideId, status: "accepted", driver: driverId },
+        { status: "arrived", arrivedAt: new Date() },
         { new: true },
       );
 
-      if (!ride)
+      if (!ride) {
         return socket.emit("invalidAction", {
-          message: "Ride not in assigned status",
-        });
-
-      console.log(`🚦 Driver ${driverId} arrived at pickup for ride ${rideId}`);
-
-      // Notify rider
-      const riderSocketId = riderSockets.get(ride.passengerId?.toString());
-      if (riderSocketId) {
-        io.to(riderSocketId).emit("rideOngoing", {
-          rideId: ride._id.toString(),
-          driverId,
+          message: "Ride not in accepted status",
         });
       }
 
-      // Confirm to driver
+      console.log(`🚦 Driver ${driverId} arrived at pickup for ride ${rideId}`);
+
+      // ✅ Notify driver
       socket.emit("pickupConfirmed", { ride });
+
+      // Notify rider
+      const passengerId = ride.passengers?.[0]?.userId;
+      if (passengerId) {
+        const riderSocketId = riderSockets.get(passengerId.toString());
+        if (riderSocketId) {
+          io.to(riderSocketId).emit("driverArrived", {
+            rideId: ride._id.toString(),
+            driverId,
+            message: "Your driver has arrived!",
+            ride, // ✅ Include full ride object
+          });
+        }
+      }
     } catch (err) {
       console.error("❌ Arrived at pickup error:", err.message);
+    }
+  });
+
+  // ---------- PICKED UP PASSENGER / START TRIP ----------
+  socket.on("pickedUpPassenger", async ({ rideId, driverId }) => {
+    try {
+      const ride = await Ride.findOneAndUpdate(
+        { _id: rideId, status: "arrived", driver: driverId },
+        { status: "ongoing", startedAt: new Date() },
+        { new: true },
+      );
+
+      if (!ride) {
+        return socket.emit("invalidAction", {
+          message: "Ride not in arrived status",
+        });
+      }
+
+      console.log(`🚀 Trip started for ride ${rideId}`);
+
+      // ✅ Notify DRIVER with full ride object
+      socket.emit("tripStarted", { ride });
+
+      // ✅ Notify rider with full ride object
+      const passengerId = ride.passengers?.[0]?.userId;
+      if (passengerId) {
+        const riderSocketId = riderSockets.get(passengerId.toString());
+        if (riderSocketId) {
+          io.to(riderSocketId).emit("rideOngoing", {
+            rideId: ride._id.toString(),
+            driverId,
+            message: "Trip in progress",
+            ride, // ✅ Include full ride object
+          });
+        }
+      }
+    } catch (err) {
+      console.error("❌ Start trip error:", err.message);
     }
   });
 
@@ -204,33 +299,68 @@ io.on("connection", (socket) => {
     try {
       const ride = await Ride.findOneAndUpdate(
         { _id: rideId, status: "ongoing", driver: driverId },
-        { status: "completed" },
+        { status: "completed", completedAt: new Date() },
         { new: true },
       );
 
-      if (!ride)
+      if (!ride) {
         return socket.emit("invalidAction", { message: "Ride not ongoing" });
+      }
 
       console.log(`🏁 Ride ${rideId} completed by driver ${driverId}`);
 
-      const riderSocketId = riderSockets.get(ride.passengerId?.toString());
-      if (riderSocketId) {
-        io.to(riderSocketId).emit("rideCompleted", {
-          rideId: ride._id.toString(),
-          driverId,
-        });
-      }
-
+      // ✅ Notify DRIVER with full ride object
       socket.emit("tripEnded", { ride });
+
+      // ✅ Notify RIDER with full ride object
+      const passengerId = ride.passengers?.[0]?.userId;
+      if (passengerId) {
+        const riderSocketId = riderSockets.get(passengerId.toString());
+        if (riderSocketId) {
+          io.to(riderSocketId).emit("rideCompleted", {
+            rideId: ride._id.toString(),
+            driverId,
+            message: "Your ride is complete",
+            ride, // ✅ Include full ride object
+          });
+        }
+      }
     } catch (err) {
       console.error("❌ End trip error:", err.message);
     }
   });
 
   // ---------- REJECT RIDE ----------
-  socket.on("rejectRide", ({ rideId, driverId }) => {
-    console.log(`❌ Driver ${driverId} rejected ride ${rideId}`);
-    socket.emit("rideRejected", { rideId });
+  socket.on("rejectRide", async ({ rideId, driverId }) => {
+    try {
+      console.log(`❌ Driver ${driverId} rejected ride ${rideId}`);
+
+      const rideOffer = global.rideOffers.get(rideId);
+      if (!rideOffer || rideOffer.acceptedBy) {
+        return socket.emit("rideAlreadyTaken", { rideId });
+      }
+
+      await Ride.findByIdAndUpdate(rideId, {
+        $push: { rejectedBy: driverId },
+      });
+
+      if (rideOffer) {
+        rideOffer.offeredTo = rideOffer.offeredTo.filter(
+          (id) => id !== driverId,
+        );
+
+        if (rideOffer.offeredTo.length === 0) {
+          await Ride.findByIdAndUpdate(rideId, {
+            status: "no_drivers_available",
+          });
+          console.log(`📭 All drivers rejected ride ${rideId}`);
+        }
+      }
+
+      socket.emit("rideRejected", { rideId });
+    } catch (err) {
+      console.error("❌ Reject ride error:", err.message);
+    }
   });
 
   // ---------- DISCONNECT ----------

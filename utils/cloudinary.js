@@ -7,28 +7,13 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-/* DRIVER PROFILE PHOTO */
-const driverPhotoStorage = new CloudinaryStorage({
+const storage = new CloudinaryStorage({
   cloudinary,
   params: {
-    folder: "drop/drivers",
-    allowed_formats: ["jpg", "png", "jpeg"],
-    transformation: [{ width: 400, height: 400, crop: "fill" }],
+    folder: "chowspace_products",
+    allowedFormats: ["jpg", "png", "jpeg"],
+    transformation: [{ width: 500, height: 500, crop: "limit" }],
   },
 });
 
-/* PACKAGE / PRODUCT IMAGE */
-const packageImageStorage = new CloudinaryStorage({
-  cloudinary,
-  params: {
-    folder: "drop/packages",
-    allowed_formats: ["jpg", "png", "jpeg"],
-    transformation: [{ width: 600, height: 600, crop: "limit" }],
-  },
-});
-
-module.exports = {
-  cloudinary,
-  driverPhotoStorage,
-  packageImageStorage,
-};
+module.exports = { cloudinary, storage };

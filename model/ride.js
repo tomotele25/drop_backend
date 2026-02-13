@@ -1,79 +1,146 @@
 const mongoose = require("mongoose");
 
-const rideSchema = new mongoose.Schema({
-  driver: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: "Rider",
-    required: false,
-  },
-  pickup: {
-    type: String,
-    required: true,
-    trim: true,
-  },
-  destination: {
-    type: String,
-    required: true,
-    trim: true,
-  },
-  distance: {
-    type: Number,
-    required: true,
-  },
-  duration: {
-    type: Number, 
-    required: true,
-  },
-
-  pickupCoordinates: {
-    lat: { type: Number },
-    lng: { type: Number },
-  },
-  destinationCoordinates: {
-    lat: { type: Number },
-    lng: { type: Number },
-  },
-
-  rideType: {
-    type: String,
-    enum: ["Standard", "Premium", "Shared"],
-    default: "Standard",
-  },
-
-  totalSeats: {
-    type: Number,
-    default: 6,
-  },
-  availableSeats: {
-    type: Number,
-    default: 4,
-  },
-  passengers: [
-    {
-      name: {
-        type: String,
-        required: true,
-      },
-      userId: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "User",
-      },
+const rideSchema = new mongoose.Schema(
+  {
+    // Driver - will be null until a driver accepts
+    driver: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Rider",
+      default: null,
     },
-  ],
 
-  basePrice: {
-    type: Number,
-    required: true,
+    // Pickup location
+    pickup: {
+      type: String,
+      required: true,
+    },
+
+    // Destination location
+    destination: {
+      type: String,
+      required: true,
+    },
+
+    // Coordinates
+    pickupCoordinates: {
+      lat: Number,
+      lng: Number,
+    },
+
+    destinationCoordinates: {
+      lat: Number,
+      lng: Number,
+    },
+
+    // Trip details
+    distance: {
+      type: Number,
+      required: true,
+    },
+
+    duration: {
+      type: Number,
+      required: true,
+    },
+
+    // Ride type
+    rideType: {
+      type: String,
+      enum: ["Standard", "Premium", "Comfort"],
+      default: "standard",
+    },
+
+    // Base price
+    basePrice: {
+      type: Number,
+      required: true,
+    },
+
+    // Passengers
+    passengers: [
+      {
+        userId: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+        },
+        name: String,
+        phone: String,
+      },
+    ],
+
+    // Status
+    status: {
+      type: String,
+      enum: [
+        "pending",
+        "requested",
+        "accepted",
+        "arrived",
+        "ongoing",
+        "completed",
+        "cancelled",
+        "no_drivers_available",
+      ],
+      default: "pending",
+    },
+
+    // Timestamps
+    requestedAt: {
+      type: Date,
+      default: null,
+    },
+
+    acceptedAt: {
+      type: Date,
+      default: null,
+    },
+
+    arrivedAt: {
+      type: Date,
+      default: null,
+    },
+
+    startedAt: {
+      type: Date,
+      default: null,
+    },
+
+    completedAt: {
+      type: Date,
+      default: null,
+    },
+
+    // Rejected by drivers
+    rejectedBy: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Rider",
+      },
+    ],
+
+    // Rating
+    rating: {
+      type: Number,
+      min: 1,
+      max: 5,
+      default: null,
+    },
+
+    // Review
+    review: {
+      type: String,
+      default: null,
+    },
   },
-  status: {
-    type: String,
-    enum: ["requested", "assigned", "ongoing", "completed", "cancelled"],
-    default: "requested",
+  {
+    timestamps: true,
   },
-  createdAt: {
-    type: Date,
-    default: Date.now,
-  },
-});
+);
+
+// ✅ NO PRE-SAVE HOOKS - Driver will only be assigned when driver accepts
+
+// Index for finding active rides
+rideSchema.index({ driver: 1, status: 1 });
+rideSchema.index({ "passengers.userId": 1, status: 1 });
 
 module.exports = mongoose.model("Ride", rideSchema);

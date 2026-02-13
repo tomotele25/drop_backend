@@ -1,13 +1,6 @@
 const multer = require("multer");
-const {
-  driverPhotoStorage,
-  packageImageStorage,
-} = require("../utils/cloudinary");
+const { storage } = require("../utils/cloudinary");
 
-const uploadDriverPhoto = multer({ storage: driverPhotoStorage });
-const uploadPackageImage = multer({ storage: packageImageStorage });
+const upload = multer({ storage });
 
-module.exports = {
-  uploadDriverPhoto,
-  uploadPackageImage,
-};
+module.exports = upload;
