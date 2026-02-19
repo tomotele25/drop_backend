@@ -10,6 +10,7 @@ const authRoute = require("../routes/authRoute");
 const rideRoute = require("../routes/rideRoute");
 const riderRoute = require("../routes/riderRoute");
 const percelRoute = require("../routes/percelRoute");
+const carpoolRoute = require("../routes/carpoolRoute"); 
 
 // Models
 const Ride = require("../model/ride");
@@ -49,6 +50,7 @@ app.use("/api", authRoute);
 app.use("/api", rideRoute);
 app.use("/api", riderRoute);
 app.use("/api", percelRoute);
+app.use("/api/carpool", carpoolRoute);
 
 // ================= HTTP SERVER =================
 const server = http.createServer(app);
@@ -381,7 +383,22 @@ io.on("connection", (socket) => {
       console.log(`🧍 Rider removed: ${riderId}`);
     }
   });
+
+  socket.on("joinRoom", (roomId) => {
+    socket.join(roomId);
+    console.log(`🚗 Socket ${socket.id} joined room ${roomId}`);
+  });
+
+  socket.on("leaveRoom", (roomId) => {
+    socket.leave(roomId);
+    console.log(`🚪 Socket ${socket.id} left room ${roomId}`);
+  });
+
+
 });
+
+
+
 
 // ================= START SERVER =================
 const startServer = async () => {

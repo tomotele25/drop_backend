@@ -414,7 +414,7 @@ const getAvailableRider = async (req, res) => {
 const getRiderById = async (req, res) => {
   try {
     const rider = await Rider.findById(req.params.id).select(
-      "fullname carModel carColor plateNo currentLocation phoney",
+      "fullname carModel carColor plateNo currentLocation contact profileImg email isActive createdAt",
     );
 
     if (!rider) {
