@@ -1,5 +1,6 @@
 const jwt = require("jsonwebtoken");
 const User = require("../model/user");
+const Rider = require("../model/rider");
 
 
 /**
@@ -79,7 +80,7 @@ const optionalAuth = async (req, res, next) => {
 
       if (token) {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const user = await Rider.findById(decoded.id).select("-password");
+        const user = await User.findById(decoded.id).select("-password");
 
         if (user) {
           req.user = user;

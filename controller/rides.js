@@ -1,57 +1,172 @@
 require("dotenv").config();
 
+const mongoose = require("mongoose");
 const ride = require("../model/ride");
 const Ride = require("../model/ride");
 const Rider = require("../model/rider");
+const User = require("../model/user");
+const Wallet = require("../model/wallet");
+const Transaction = require("../model/transaction");
+const DriverEarning = require("../model/driverEarning");
 const axios = require("axios");
+const { initializeTransaction } = require("../utils/paystack");
+const { PLATFORM_COMMISSION_RATE } = require("../config/earnings");
+const { RIDE_OFFER_TIMEOUT_MS } = require("../config/dispatch");
+const { sendPushToUser } = require("../utils/webpush");
+
+// Thrown inside a transaction to abort it cleanly and distinguish "not
+// enough balance" (an expected, user-facing case) from a real DB error.
+class InsufficientBalanceError extends Error {}
 
 
 
-const getDistanceKm = (lat1, lng1, lat2, lng2) => {
-  const toRad = (v) => (v * Math.PI) / 180;
-  const R = 6371;
+// Re-queried at the actual moment of dispatch (not reused from booking time)
+// so a Paystack payment that takes a while to confirm still dispatches
+// against who's *currently* available, not who was available at checkout.
+//
+// Uses the 2dsphere index on Rider.location via $near instead of fetching
+// every active driver citywide into memory and Haversine-filtering in JS —
+// that pattern doesn't scale past a small driver count. $near already
+// returns results sorted nearest-first, bounded by $maxDistance, at the
+// index level.
+const findAvailableNearbyDrivers = async (pickupLoc, radiusKm = 10) => {
+  const busyDriverIds = await Ride.find({
+    status: { $in: ["ongoing", "accepted", "arrived"] },
+  }).distinct("driver");
 
-  const dLat = toRad(lat2 - lat1);
-  const dLng = toRad(lng2 - lng1);
+  const availableDrivers = await Rider.find({
+    isActive: true,
+    _id: { $nin: busyDriverIds },
+    location: {
+      $near: {
+        $geometry: { type: "Point", coordinates: [pickupLoc.lng, pickupLoc.lat] },
+        $maxDistance: radiusKm * 1000,
+      },
+    },
+  });
 
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
-
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return availableDrivers;
 };
 
-const normalize = (v) => {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-};
+// Shared by both the wallet path (dispatches immediately after booking) and
+// the Paystack webhook (dispatches only once payment is confirmed).
+const dispatchRideToDrivers = async (rideDoc) => {
+  const nearbyDrivers = await findAvailableNearbyDrivers(
+    rideDoc.pickupCoordinates,
+    10,
+  );
 
-const findNearbyDrivers = (pickupLoc, drivers, radiusKm = 10) => {
-  const nearbyDrivers = [];
+  const driverIds = nearbyDrivers.map((d) => d._id.toString());
+  global.rideOffers = global.rideOffers || new Map();
+  global.rideOffers.set(rideDoc._id.toString(), {
+    offeredAt: Date.now(),
+    offeredTo: driverIds,
+    acceptedBy: null,
+  });
 
-  for (const driver of drivers) {
-    const lat = normalize(driver.currentLocation?.latitude);
-    const lng = normalize(driver.currentLocation?.longitude);
-
-    if (lat === null || lng === null) continue;
-
-    const dist = getDistanceKm(pickupLoc.lat, pickupLoc.lng, lat, lng);
-
-    if (dist <= radiusKm) {
-      nearbyDrivers.push({
-        driver,
-        distance: dist,
+  let notifiedCount = 0;
+  for (const driver of nearbyDrivers) {
+    const driverId = driver._id.toString();
+    const socketId = global.driverSockets?.get(driverId);
+    if (socketId) {
+      global.io.to(socketId).emit("rideAssigned", {
+        rideId: rideDoc._id.toString(),
+        pickup: rideDoc.pickup,
+        destination: rideDoc.destination,
+        pickupCoordinates: rideDoc.pickupCoordinates,
+        destinationCoordinates: rideDoc.destinationCoordinates,
+        distance: rideDoc.distance,
+        duration: rideDoc.duration,
+        fare: rideDoc.basePrice,
+        passengerName: rideDoc.passengers?.[0]?.name,
+        rideType: rideDoc.rideType,
       });
+      notifiedCount++;
+    }
+
+    // Push goes out regardless of live socket status — it's the channel
+    // that can still reach a driver whose tab isn't focused. Fire-and-forget:
+    // a push failure shouldn't block dispatching to the rest of the drivers.
+    if (driver.user) {
+      sendPushToUser(driver.user, {
+        title: "New ride request",
+        body: `${rideDoc.pickup} → ${rideDoc.destination} · ₦${rideDoc.basePrice}`,
+        url: `/ride/${rideDoc._id.toString()}`,
+        rideId: rideDoc._id.toString(),
+      }).catch((err) => console.error("Push dispatch error:", err.message));
     }
   }
 
-  nearbyDrivers.sort((a, b) => a.distance - b.distance);
-  return nearbyDrivers.map((d) => d.driver);
+  return { nearbyDrivers, notifiedCount };
+};
+
+// Creates the driver's earning ledger row the moment a ride is genuinely
+// finished and paid for. The unique index on `ride` makes this safe to call
+// from both the REST completeRide endpoint and the socket endTrip handler
+// without risking a duplicate payout entry.
+const settleDriverEarning = async (rideDoc) => {
+  if (!rideDoc.driver || rideDoc.paymentStatus !== "paid") return;
+
+  const commissionRate = PLATFORM_COMMISSION_RATE;
+  const commissionAmount = Math.round(rideDoc.basePrice * commissionRate);
+  const netEarning = rideDoc.basePrice - commissionAmount;
+
+  try {
+    await DriverEarning.create({
+      driver: rideDoc.driver,
+      ride: rideDoc._id,
+      grossAmount: rideDoc.basePrice,
+      commissionRate,
+      commissionAmount,
+      netEarning,
+    });
+  } catch (err) {
+    if (err.code === 11000) return; // already settled for this ride — ignore
+    console.error("Failed to create driver earning ledger row:", err.message);
+  }
+};
+
+// Auto-expires a ride that's been dispatched (paid, broadcast to drivers)
+// but sat "pending" with no acceptance past the timeout — otherwise these
+// hang forever with no customer-visible signal. Only touches paid rides:
+// an unpaid Paystack ride sitting "pending" is a different lifecycle
+// (waiting on checkout, not on driver acceptance) and isn't dispatched yet.
+const expireStalePendingRides = async () => {
+  const cutoff = new Date(Date.now() - RIDE_OFFER_TIMEOUT_MS);
+  const staleRides = await Ride.find({
+    status: "pending",
+    paymentStatus: "paid",
+    requestedAt: { $lt: cutoff },
+  });
+
+  if (staleRides.length === 0) return;
+
+  await Ride.updateMany(
+    { _id: { $in: staleRides.map((r) => r._id) } },
+    { status: "no_drivers_available" },
+  );
+
+  for (const staleRide of staleRides) {
+    global.rideOffers?.delete(staleRide._id.toString());
+
+    const passengerId = staleRide.passengers?.[0]?.userId?.toString();
+    if (global.io && passengerId) {
+      const riderSocketId = global.riderSockets?.get(passengerId);
+      if (riderSocketId) {
+        global.io.to(riderSocketId).emit("rideExpired", {
+          rideId: staleRide._id.toString(),
+          message: "No drivers responded in time.",
+        });
+      }
+    }
+  }
+
+  console.log(`⏱️ Expired ${staleRides.length} stale pending ride(s)`);
 };
 
 const bookRide = async (req, res) => {
   try {
-    const { pickup, destination, rideType, passengers, fare } = req.body;
+    const { pickup, destination, rideType, passengers, paymentMethod } = req.body;
 
     if (!pickup || !destination || !rideType) {
       return res.status(400).json({
@@ -67,8 +182,15 @@ const bookRide = async (req, res) => {
       });
     }
 
-    let basePrice = fare ? Number(fare) : 0;
-    if (isNaN(basePrice)) basePrice = 0;
+    if (!["wallet", "paystack"].includes(paymentMethod)) {
+      return res.status(400).json({
+        success: false,
+        message: "paymentMethod must be 'wallet' or 'paystack'",
+      });
+    }
+
+    // Fare is always computed server-side below; any client-supplied `fare` is ignored.
+    let basePrice = 0;
 
     // GEOCODE PICKUP
     const pickupGeo = await axios.get(
@@ -133,48 +255,35 @@ const bookRide = async (req, res) => {
     const distance = Number((leg.distance.value / 1000).toFixed(2));
     const duration = Math.ceil(leg.duration.value / 60);
 
-    // CALCULATE FARE
-    if (basePrice === 0) {
-      const BASE_FARES = { standard: 500, premium: 1000 };
-      const PER_KM = 149;
-      const PER_MINUTE = 22;
+    // CALCULATE FARE (server-side only — never trust a client-supplied fare)
+    const BASE_FARES = { standard: 500, premium: 1000 };
+    const PER_KM = 149;
+    const PER_MINUTE = 22;
 
-      const fareCalc =
-        BASE_FARES[rideType.toLowerCase()] +
-        distance * PER_KM +
-        duration * PER_MINUTE;
-
-      basePrice = Math.ceil(fareCalc / 50) * 50;
+    const normalizedType = rideType.toLowerCase();
+    if (!(normalizedType in BASE_FARES)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid ride type",
+      });
     }
 
-    // FIND AVAILABLE DRIVERS
-    const busyDriverIds = await Ride.find({
-      status: { $in: ["ongoing", "accepted", "arrived"] },
-    }).distinct("driver");
+    const fareCalc =
+      BASE_FARES[normalizedType] + distance * PER_KM + duration * PER_MINUTE;
 
-    const availableDrivers = await Rider.find({
-      isActive: true,
-      _id: { $nin: busyDriverIds },
-    });
+    basePrice = Math.ceil(fareCalc / 50) * 50;
 
-    if (!availableDrivers.length) {
+    // Pre-flight check only — confirms drivers exist before we ever charge
+    // the customer. The actual dispatch re-queries fresh availability later.
+    const preCheckDrivers = await findAvailableNearbyDrivers(pickupLoc, 10);
+    if (!preCheckDrivers.length) {
       return res.status(400).json({
         success: false,
         message: "No drivers available nearby",
       });
     }
 
-    // FIND NEARBY DRIVERS
-    const nearbyDrivers = findNearbyDrivers(pickupLoc, availableDrivers, 10);
-
-    if (!nearbyDrivers.length) {
-      return res.status(400).json({
-        success: false,
-        message: "No drivers available within 10km of your location",
-      });
-    }
-
-    // ✅ CREATE RIDE WITH NO DRIVER ASSIGNED
+    // ✅ CREATE RIDE WITH NO DRIVER ASSIGNED, UNPAID UNTIL PAYMENT SETTLES
     const ride = await Ride.create({
       driver: null,
       pickup,
@@ -187,70 +296,134 @@ const bookRide = async (req, res) => {
       passengers,
       basePrice,
       status: "pending",
+      paymentMethod,
+      paymentStatus: "unpaid",
       requestedAt: new Date(),
       rejectedBy: [],
     });
 
-    console.log(`📝 Ride created: ${ride._id}`);
-    console.log(`   Driver: ${ride.driver || "null (NOT ASSIGNED) ✅"}`);
-    console.log(`   Status: ${ride.status}`);
+    console.log(`📝 Ride created: ${ride._id} (payment: ${paymentMethod})`);
 
-    // ✅ TRACK OFFER IN MEMORY
-    const driverIds = nearbyDrivers.map((d) => d._id.toString());
-    global.rideOffers = global.rideOffers || new Map();
-    global.rideOffers.set(ride._id.toString(), {
-      offeredAt: Date.now(),
-      offeredTo: driverIds,
-      acceptedBy: null,
-    });
+    if (paymentMethod === "wallet") {
+      // Debit, ledger entry, and marking the ride paid all need to happen
+      // together — previously these were three separate sequential writes,
+      // so a crash between them could leave a debited wallet with no
+      // ledger record, or a "paid" ride with no matching debit. Wrapped in
+      // a transaction so it's all-or-nothing.
+      const session = await mongoose.startSession();
+      let wallet;
+      try {
+        await session.withTransaction(async () => {
+          // Atomic, balance-guarded debit — cannot go negative even under concurrent spends.
+          wallet = await Wallet.findOneAndUpdate(
+            { user: req.user.id, balance: { $gte: basePrice } },
+            { $inc: { balance: -basePrice } },
+            { new: true, session },
+          );
 
-    // ✅ BROADCAST TO ALL NEARBY DRIVERS
-    console.log(`\n📢 Broadcasting to ${nearbyDrivers.length} drivers:`);
-    let notifiedCount = 0;
+          if (!wallet) {
+            throw new InsufficientBalanceError();
+          }
 
-    for (const driver of nearbyDrivers) {
-      const driverId = driver._id.toString();
-      const socketId = global.driverSockets?.get(driverId);
+          await Transaction.create(
+            [
+              {
+                user: req.user.id,
+                type: "order_payment",
+                method: "wallet",
+                reference: `WALLET-ORDER-${ride._id}`,
+                amount: basePrice,
+                status: "success",
+                orderType: "Ride",
+                orderId: ride._id,
+              },
+            ],
+            { session },
+          );
 
-      console.log(
-        `   → ${driver.fullname}: ${socketId ? "NOTIFIED ✅" : "NOT CONNECTED ⚠️"}`,
-      );
-
-      if (socketId) {
-        global.io.to(socketId).emit("rideAssigned", {
-          rideId: ride._id.toString(),
-          pickup,
-          destination,
-          pickupCoordinates: pickupLoc,
-          destinationCoordinates: destinationLoc,
-          distance,
-          duration,
-          fare: ride.basePrice,
-          passengerName: ride.passengers[0].name,
-          rideType,
+          ride.paymentStatus = "paid";
+          await ride.save({ session });
         });
-        notifiedCount++;
+      } catch (err) {
+        if (err instanceof InsufficientBalanceError) {
+          await Ride.findByIdAndDelete(ride._id);
+          return res.status(402).json({
+            success: false,
+            message: "Insufficient wallet balance",
+          });
+        }
+        throw err;
+      } finally {
+        session.endSession();
       }
+
+      // Dispatch is deliberately outside the transaction — it's a real-time
+      // side effect (DB queries + socket emits), not something that should
+      // roll back the payment if a driver-lookup call happens to be slow.
+      const { notifiedCount } = await dispatchRideToDrivers(ride);
+
+      return res.status(200).json({
+        success: true,
+        message: `Paid from wallet. Ride request sent to ${notifiedCount} nearby drivers.`,
+        ride: {
+          _id: ride._id,
+          status: ride.status,
+          paymentStatus: ride.paymentStatus,
+          driver: ride.driver,
+          pickup: ride.pickup,
+          destination: ride.destination,
+          fare: ride.basePrice,
+          distance: ride.distance,
+          duration: ride.duration,
+        },
+        driversNotified: notifiedCount,
+      });
     }
 
-    console.log(
-      `✅ Notified ${notifiedCount}/${nearbyDrivers.length} drivers\n`,
-    );
+    // paymentMethod === "paystack" — customer pays first via Paystack
+    // (card or Paystack's own bank-transfer channel), driver dispatch only
+    // happens once the webhook confirms the charge.
+    const requester = await User.findById(req.user.id).select("email");
+    const reference = `RIDE-${ride._id}-${Date.now()}`;
+
+    await Transaction.create({
+      user: req.user.id,
+      type: "order_payment",
+      method: "paystack",
+      reference,
+      amount: basePrice,
+      status: "pending",
+      orderType: "Ride",
+      orderId: ride._id,
+    });
+
+    const paystackRes = await initializeTransaction({
+      email: requester.email,
+      amountNaira: basePrice,
+      reference,
+      metadata: { rideId: ride._id.toString(), type: "order_payment" },
+      callback_url: process.env.FRONTEND_URL
+        ? `${process.env.FRONTEND_URL}/ride-tracking/RideTracking?rideId=${ride._id}`
+        : undefined,
+    });
 
     return res.status(200).json({
       success: true,
-      message: `Ride request sent to ${notifiedCount} nearby drivers. First to accept gets the ride.`,
+      message: "Ride created. Complete payment to notify nearby drivers.",
       ride: {
         _id: ride._id,
         status: ride.status,
-        driver: ride.driver,
+        paymentStatus: ride.paymentStatus,
         pickup: ride.pickup,
         destination: ride.destination,
         fare: ride.basePrice,
         distance: ride.distance,
         duration: ride.duration,
       },
-      driversNotified: notifiedCount,
+      payment: {
+        authorization_url: paystackRes.data.authorization_url,
+        reference,
+      },
     });
   } catch (error) {
     console.error("❌ Ride booking error:", error.message);
@@ -440,6 +613,19 @@ const getRideById = async (req, res) => {
         .json({ success: false, message: "Ride not found" });
     }
 
+    const requesterId = req.user?.id;
+    const isPassenger = ride.passengers.some(
+      (p) => p.userId?.toString() === requesterId,
+    );
+    const isDriver =
+      ride.driver?.user?.toString() === requesterId ||
+      ride.driver?._id?.toString() === req.user?.riderId;
+    const isAdmin = req.user?.role === "admin";
+
+    if (!isPassenger && !isDriver && !isAdmin) {
+      return res.status(403).json({ success: false, message: "Not authorized to view this ride" });
+    }
+
     res.status(200).json({
       success: true,
       ride,
@@ -473,7 +659,12 @@ const getTotalRides = async (req, res) => {
       return res.status(404).json({ success: false, message: "Id not found" });
     }
 
-  
+    const isAdmin = req.user?.role === "admin";
+    const isSelf = req.user?.riderId === id;
+    if (!isAdmin && !isSelf) {
+      return res.status(403).json({ success: false, message: "Not authorized" });
+    }
+
     const rides = await ride.find({ driver: id });
 
     return res.status(200).json({
@@ -488,6 +679,232 @@ const getTotalRides = async (req, res) => {
 };
 
 
+// ================= CANCEL RIDE =================
+// Customer, the assigned driver, or an admin can cancel — but only while the
+// ride hasn't already started/finished. The atomic status-guarded update
+// prevents cancelling a ride that has concurrently moved to "ongoing"/"completed".
+const cancelRide = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body || {};
+
+    const existing = await Ride.findById(id);
+    if (!existing) {
+      return res.status(404).json({ success: false, message: "Ride not found" });
+    }
+
+    const isAdmin = req.user?.role === "admin";
+    const isDriver =
+      existing.driver && existing.driver.toString() === req.user?.riderId;
+    const isPassenger = existing.passengers.some(
+      (p) => p.userId?.toString() === req.user?.id,
+    );
+
+    if (!isAdmin && !isDriver && !isPassenger) {
+      return res.status(403).json({ success: false, message: "Not authorized to cancel this ride" });
+    }
+
+    const cancelledBy = isAdmin ? "admin" : isDriver ? "driver" : "customer";
+
+    const ride = await Ride.findOneAndUpdate(
+      { _id: id, status: { $in: ["pending", "requested", "accepted", "arrived"] } },
+      {
+        status: "cancelled",
+        cancelledBy,
+        cancelReason: reason || null,
+        cancelledAt: new Date(),
+      },
+      { new: true },
+    );
+
+    if (!ride) {
+      return res.status(409).json({
+        success: false,
+        message: "Ride can no longer be cancelled (already ongoing, completed, or cancelled)",
+      });
+    }
+
+    // Refund a wallet-paid ride — this was previously missing entirely: a
+    // customer who paid from their wallet and then cancelled just lost that
+    // money with no way to get it back. The cancellation above already
+    // committed atomically; the refund is a best-effort compensating action
+    // on top of it, wrapped in its own transaction so the wallet credit and
+    // the ledger entry land together.
+    let refunded = false;
+    if (ride.paymentMethod === "wallet" && ride.paymentStatus === "paid") {
+      const session = await mongoose.startSession();
+      try {
+        await session.withTransaction(async () => {
+          await Wallet.findOneAndUpdate(
+            { user: ride.passengers?.[0]?.userId },
+            { $inc: { balance: ride.basePrice } },
+            { upsert: true, session },
+          );
+          await Transaction.create(
+            [
+              {
+                user: ride.passengers?.[0]?.userId,
+                type: "refund",
+                method: "wallet",
+                reference: `REFUND-${ride._id}`,
+                amount: ride.basePrice,
+                status: "success",
+                orderType: "Ride",
+                orderId: ride._id,
+              },
+            ],
+            { session },
+          );
+          await Ride.updateOne(
+            { _id: ride._id },
+            { paymentStatus: "refunded" },
+            { session },
+          );
+        });
+        refunded = true;
+        ride.paymentStatus = "refunded";
+      } catch (err) {
+        // The cancellation itself already succeeded and must not be rolled
+        // back for this — log loudly so it surfaces for manual reconciliation
+        // rather than silently losing the customer's money.
+        console.error(`❌ Refund failed for cancelled ride ${ride._id}:`, err.message);
+      } finally {
+        session.endSession();
+      }
+    } else if (ride.paymentMethod === "paystack" && ride.paymentStatus === "paid") {
+      // No automated Paystack refund yet — flagging this loudly rather than
+      // silently doing nothing, since real money is owed back here.
+      console.warn(
+        `⚠️ Ride ${ride._id} cancelled with a paid Paystack transaction — refund must be issued manually via the Paystack dashboard.`,
+      );
+    }
+
+    // Notify the other party in real time if they're connected.
+    const passengerId = ride.passengers?.[0]?.userId?.toString();
+    if (global.io) {
+      if (ride.driver) {
+        const driverSocketId = global.driverSockets?.get(ride.driver.toString());
+        if (driverSocketId) global.io.to(driverSocketId).emit("rideCancelled", { rideId: ride._id.toString(), by: cancelledBy });
+      }
+      if (passengerId) {
+        const riderSocketId = global.riderSockets?.get(passengerId);
+        if (riderSocketId) global.io.to(riderSocketId).emit("rideCancelled", { rideId: ride._id.toString(), by: cancelledBy });
+      }
+    }
+
+    // If a driver was already offered/assigned this ride, drop it from the in-memory offer map too.
+    if (global.rideOffers?.has(id)) global.rideOffers.delete(id);
+
+    return res.status(200).json({ success: true, ride, refunded });
+  } catch (error) {
+    console.error("Cancel ride error:", error);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+// ================= DRIVER ACTION ENDPOINTS (REST fallback for the socket events) =================
+// These mirror the atomic, status-guarded transitions in api/server.js's socket
+// handlers so a driver app that isn't connected over a live socket (or whose
+// emit silently dropped) still has a reliable way to progress a ride's status.
+
+const markArrivedAtPickup = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!req.user?.riderId) {
+      return res.status(403).json({ success: false, message: "Drivers only" });
+    }
+
+    const ride = await Ride.findOneAndUpdate(
+      { _id: id, status: "accepted", driver: req.user.riderId },
+      { status: "arrived", arrivedAt: new Date() },
+      { new: true },
+    );
+
+    if (!ride) {
+      return res.status(409).json({ success: false, message: "Ride is not in accepted status" });
+    }
+
+    const passengerId = ride.passengers?.[0]?.userId?.toString();
+    if (global.io && passengerId) {
+      const riderSocketId = global.riderSockets?.get(passengerId);
+      if (riderSocketId) {
+        global.io.to(riderSocketId).emit("driverArrived", { rideId: ride._id.toString(), ride });
+      }
+    }
+
+    return res.status(200).json({ success: true, ride });
+  } catch (error) {
+    console.error("Mark arrived error:", error);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+const markPickedUp = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!req.user?.riderId) {
+      return res.status(403).json({ success: false, message: "Drivers only" });
+    }
+
+    const ride = await Ride.findOneAndUpdate(
+      { _id: id, status: "arrived", driver: req.user.riderId },
+      { status: "ongoing", startedAt: new Date() },
+      { new: true },
+    );
+
+    if (!ride) {
+      return res.status(409).json({ success: false, message: "Ride is not in arrived status" });
+    }
+
+    const passengerId = ride.passengers?.[0]?.userId?.toString();
+    if (global.io && passengerId) {
+      const riderSocketId = global.riderSockets?.get(passengerId);
+      if (riderSocketId) {
+        global.io.to(riderSocketId).emit("rideOngoing", { rideId: ride._id.toString(), ride });
+      }
+    }
+
+    return res.status(200).json({ success: true, ride });
+  } catch (error) {
+    console.error("Mark picked up error:", error);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+const completeRide = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!req.user?.riderId) {
+      return res.status(403).json({ success: false, message: "Drivers only" });
+    }
+
+    const ride = await Ride.findOneAndUpdate(
+      { _id: id, status: "ongoing", driver: req.user.riderId },
+      { status: "completed", completedAt: new Date() },
+      { new: true },
+    );
+
+    if (!ride) {
+      return res.status(409).json({ success: false, message: "Ride is not ongoing" });
+    }
+
+    await settleDriverEarning(ride);
+
+    const passengerId = ride.passengers?.[0]?.userId?.toString();
+    if (global.io && passengerId) {
+      const riderSocketId = global.riderSockets?.get(passengerId);
+      if (riderSocketId) {
+        global.io.to(riderSocketId).emit("rideCompleted", { rideId: ride._id.toString(), ride });
+      }
+    }
+
+    return res.status(200).json({ success: true, ride });
+  } catch (error) {
+    console.error("Complete ride error:", error);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
 module.exports = {
   bookRide,
   getAutocompleteSuggestions,
@@ -495,5 +912,12 @@ module.exports = {
   getAvailableRider,
   getRiderById,
   getRideById,
-  getTotalRides
+  getTotalRides,
+  cancelRide,
+  markArrivedAtPickup,
+  markPickedUp,
+  completeRide,
+  dispatchRideToDrivers,
+  settleDriverEarning,
+  expireStalePendingRides,
 };

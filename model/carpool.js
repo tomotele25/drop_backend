@@ -104,6 +104,20 @@ const carpoolRoomSchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+
+    cancelledBy: {
+      type: String,
+      enum: ["driver", "admin"],
+      default: null,
+    },
+    cancelReason: {
+      type: String,
+      default: null,
+    },
+    cancelledAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,

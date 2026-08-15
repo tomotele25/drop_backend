@@ -1,5 +1,6 @@
 const Parcel = require("../model/percel");
 const axios = require("axios");
+const { sendParcelNotificationEmail } = require("../mailer");
 
 const sendPackage = async (req, res) => {
   try {
@@ -82,10 +83,19 @@ const sendPackage = async (req, res) => {
       receiverPhone: receiverPhone,
       message: message || "",
       paymentBy,
-      exness: express || false,
+      express: express || "standard",
+      senderId: req.user.id,
+      image: req.file?.path || null,
     });
 
     await newParcel.save();
+
+    // Deliveries are still arranged by hand — notify the operator with
+    // everything needed to pick this up. Never let an email hiccup fail
+    // the parcel request itself.
+    sendParcelNotificationEmail(newParcel).catch((err) =>
+      console.error("Parcel notification email failed:", err),
+    );
 
     return res.status(201).json({
       success: true,

@@ -118,6 +118,34 @@ const rideSchema = new mongoose.Schema(
       },
     ],
 
+    paymentMethod: {
+      type: String,
+      enum: ["wallet", "paystack"],
+      default: null,
+    },
+
+    paymentStatus: {
+      type: String,
+      enum: ["unpaid", "paid", "refunded"],
+      default: "unpaid",
+    },
+
+    cancelledBy: {
+      type: String,
+      enum: ["customer", "driver", "admin"],
+      default: null,
+    },
+
+    cancelReason: {
+      type: String,
+      default: null,
+    },
+
+    cancelledAt: {
+      type: Date,
+      default: null,
+    },
+
     // Rating
     rating: {
       type: Number,

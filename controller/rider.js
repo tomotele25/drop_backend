@@ -1,10 +1,10 @@
+const mongoose = require("mongoose");
 const Rider = require("../model/rider");
 const User = require("../model/user");
 const bcrypt = require("bcrypt");
+const { resolveAccountNumber, createTransferRecipient, listBanks } = require("../utils/paystack");
 
 const createRider = async (req, res) => {
-  let createdUserId = null;
-
   try {
     const {
       fullname,
@@ -77,38 +77,60 @@ const createRider = async (req, res) => {
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Create user
-    const newUser = await User.create({
-      fullname,
-      email,
-      password: hashedPassword,
-      contact,
-      role: "rider",
-    });
+    // User + Rider must exist together or not at all — previously this used
+    // a manual "delete the user if Rider.create fails" rollback, which
+    // leaves a real window (a crash between the two writes, or the rollback
+    // itself failing) where an orphaned User with no matching Rider exists.
+    // A transaction removes that window entirely.
+    let newUser, newRider;
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        [newUser] = await User.create(
+          [
+            {
+              fullname,
+              email,
+              password: hashedPassword,
+              contact,
+              role: "rider",
+            },
+          ],
+          { session },
+        );
 
-    createdUserId = newUser._id;
-    console.log("User created with ID:", createdUserId);
-
-    // Create rider
-    const newRider = await Rider.create({
-      fullname,
-      email,
-      carColor,
-      carModel,
-      plateNo,
-      profileImg,
-      contact,
-      licenseNo,
-      dob: dob || null,
-      address,
-      emergencyContact,
-      bvn,
-      user: newUser._id,
-      currentLocation: {
-        latitude: Number(latitude) || 0,
-        longitude: Number(longitude) || 0,
-      },
-    });
+        [newRider] = await Rider.create(
+          [
+            {
+              fullname,
+              email,
+              carColor,
+              carModel,
+              plateNo,
+              profileImg,
+              contact,
+              licenseNo,
+              dob: dob || null,
+              address,
+              emergencyContact,
+              bvn,
+              user: newUser._id,
+              currentLocation: {
+                latitude: Number(latitude) || 0,
+                longitude: Number(longitude) || 0,
+              },
+              location: {
+                type: "Point",
+                coordinates: [Number(longitude) || 0, Number(latitude) || 0],
+              },
+            },
+          ],
+          { session },
+        );
+      });
+    } finally {
+      session.endSession();
+    }
 
     console.log("✅ Rider created successfully!");
 
@@ -122,16 +144,8 @@ const createRider = async (req, res) => {
       },
     });
   } catch (error) {
-    // Rollback user if it was created
-    if (createdUserId) {
-      try {
-        await User.findByIdAndDelete(createdUserId);
-        console.log("✅ User rolled back");
-      } catch (rollbackError) {
-        console.log("❌ Rollback failed:", rollbackError.message);
-      }
-    }
-
+    // No manual rollback needed — session.withTransaction aborts and
+    // rolls back both writes automatically if either one fails.
     console.log("=== ERROR ===");
     console.log("Message:", error.message);
     console.log("Stack:", error.stack);
@@ -170,6 +184,10 @@ const getRiderStatus = async (req, res) => {
         success: false,
         message: "Rider ID is required",
       });
+    }
+
+    if (req.user?.id !== id && req.user?.role !== "admin") {
+      return res.status(403).json({ success: false, message: "Not authorized" });
     }
 
     const user = await User.findById(id).select("role");
@@ -213,6 +231,10 @@ const toggleRiderStatus = async (req, res) => {
       });
     }
 
+    if (req.user?.id !== id && req.user?.role !== "admin") {
+      return res.status(403).json({ success: false, message: "Not authorized" });
+    }
+
     const rider = await Rider.findOne({ user: id });
     if (!rider) {
       return res.status(404).json({
@@ -237,4 +259,80 @@ const toggleRiderStatus = async (req, res) => {
   }
 };
 
-module.exports = { createRider, getRiderStatus, toggleRiderStatus };
+// ================= PAYOUT BANK DETAILS =================
+
+const getBanks = async (_req, res) => {
+  try {
+    const banks = await listBanks();
+    return res.status(200).json({ success: true, banks: banks.data });
+  } catch (error) {
+    console.error("List banks error:", error?.response?.data || error.message);
+    return res.status(500).json({ success: false, message: "Could not fetch bank list" });
+  }
+};
+
+// Resolves the account number against the bank (proving the driver actually
+// owns it), then registers it as a Paystack transfer recipient so the daily
+// payout job has somewhere to send money.
+const updateBankDetails = async (req, res) => {
+  try {
+    if (!req.user?.riderId) {
+      return res.status(403).json({ success: false, message: "Drivers only" });
+    }
+
+    const { accountNumber, bankCode, bankName } = req.body;
+    if (!accountNumber || !bankCode || !bankName) {
+      return res.status(400).json({
+        success: false,
+        message: "accountNumber, bankCode and bankName are required",
+      });
+    }
+
+    const resolved = await resolveAccountNumber({ accountNumber, bankCode });
+    if (!resolved?.data?.account_name) {
+      return res.status(400).json({ success: false, message: "Could not verify account" });
+    }
+    const accountName = resolved.data.account_name;
+
+    const recipient = await createTransferRecipient({
+      name: accountName,
+      accountNumber,
+      bankCode,
+    });
+
+    const rider = await Rider.findByIdAndUpdate(
+      req.user.riderId,
+      {
+        bankCode,
+        bankName,
+        accountNumber,
+        accountName,
+        paystackRecipientCode: recipient.data.recipient_code,
+      },
+      { new: true },
+    );
+
+    return res.status(200).json({
+      success: true,
+      bankDetails: {
+        bankName: rider.bankName,
+        accountNumber: rider.accountNumber,
+        accountName: rider.accountName,
+      },
+    });
+  } catch (error) {
+    console.error("Update bank details error:", error?.response?.data || error.message);
+    return res.status(500).json({
+      success: false,
+      message: error?.response?.data?.message || "Could not verify/save bank details",
+    });
+  }
+};
+
+module.exports = {
+  createRider,
+  getRiderStatus,
+  toggleRiderStatus,
+  getBanks,
+  updateBankDetails,
+};
