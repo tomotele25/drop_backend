@@ -1,4 +1,5 @@
 const DriverEarning = require("../model/driverEarning");
+const DriverCommission = require("../model/driverCommission");
 const PayoutBatch = require("../model/payoutBatch");
 const Rider = require("../model/rider");
 const { initiateTransfer } = require("../utils/paystack");
@@ -135,7 +136,9 @@ const getPayoutBatches = async (_req, res) => {
 };
 
 // Driver-facing earnings summary — server-computed, not summed client-side
-// from raw trip data (which is timezone/clock-skew fragile).
+// from raw trip data (which is timezone/clock-skew fragile). Also includes
+// commission owed from cash/transfer rides, since both live on the same
+// earnings page.
 const getDriverEarnings = async (req, res) => {
   try {
     if (!req.user?.riderId) {
@@ -146,13 +149,17 @@ const getDriverEarnings = async (req, res) => {
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
 
-    const [todayEntries, allEntries, recent] = await Promise.all([
-      DriverEarning.find({ driver: driverId, createdAt: { $gte: startOfToday } }),
-      DriverEarning.find({ driver: driverId }),
-      DriverEarning.find({ driver: driverId }).sort({ createdAt: -1 }).limit(20),
-    ]);
+    const [todayEntries, allEntries, recent, pendingCommissions, recentCommissions] =
+      await Promise.all([
+        DriverEarning.find({ driver: driverId, createdAt: { $gte: startOfToday } }),
+        DriverEarning.find({ driver: driverId }),
+        DriverEarning.find({ driver: driverId }).sort({ createdAt: -1 }).limit(20),
+        DriverCommission.find({ driver: driverId, status: "pending" }),
+        DriverCommission.find({ driver: driverId }).sort({ createdAt: -1 }).limit(20),
+      ]);
 
     const sum = (rows) => rows.reduce((s, r) => s + r.netEarning, 0);
+    const sumCommission = (rows) => rows.reduce((s, r) => s + r.commissionAmount, 0);
 
     return res.status(200).json({
       success: true,
@@ -161,9 +168,67 @@ const getDriverEarnings = async (req, res) => {
       totalEarned: sum(allEntries.filter((e) => e.status === "paid")),
       pendingPayout: sum(allEntries.filter((e) => e.status !== "paid")),
       recent,
+      // Cash/transfer rides: what this driver owes the platform, not what
+      // the platform owes them.
+      commissionOwed: sumCommission(pendingCommissions),
+      recentCommissions,
     });
   } catch (error) {
     console.error("Get driver earnings error:", error);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+// Admin view — every driver currently carrying a commission debt, so you
+// know who to chase for settlement.
+const getOutstandingCommissions = async (_req, res) => {
+  try {
+    const pending = await DriverCommission.find({ status: "pending" }).populate(
+      "driver",
+      "fullname plateNo contact",
+    );
+
+    const byDriver = new Map();
+    for (const entry of pending) {
+      const key = entry.driver?._id?.toString();
+      if (!key) continue;
+      if (!byDriver.has(key)) {
+        byDriver.set(key, { driver: entry.driver, totalOwed: 0, rideCount: 0 });
+      }
+      const bucket = byDriver.get(key);
+      bucket.totalOwed += entry.commissionAmount;
+      bucket.rideCount += 1;
+    }
+
+    return res.status(200).json({ success: true, drivers: Array.from(byDriver.values()) });
+  } catch (error) {
+    console.error("Get outstanding commissions error:", error);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+// Admin marks a driver's outstanding commission as settled once they've
+// actually transferred it — manual by design, same as the driver-owes-
+// platform direction has no gateway integration (yet) either.
+const settleDriverCommission = async (req, res) => {
+  try {
+    const { driverId } = req.params;
+    if (!driverId) {
+      return res.status(400).json({ success: false, message: "driverId is required" });
+    }
+
+    const result = await DriverCommission.updateMany(
+      { driver: driverId, status: "pending" },
+      { status: "settled", settledAt: new Date(), settledBy: req.user?.id },
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: `Settled ${result.modifiedCount} commission entr${result.modifiedCount === 1 ? "y" : "ies"}`,
+      settledCount: result.modifiedCount,
+    });
+  } catch (error) {
+    console.error("Settle driver commission error:", error);
     return res.status(500).json({ success: false, message: "Server error" });
   }
 };
@@ -173,4 +238,6 @@ module.exports = {
   triggerSettlement,
   getPayoutBatches,
   getDriverEarnings,
+  getOutstandingCommissions,
+  settleDriverCommission,
 };

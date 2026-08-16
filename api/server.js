@@ -60,16 +60,23 @@ app.use("/api/paystack/webhook", express.raw({ type: "application/json" }));
 app.use(express.json());
 
 // ================= ROUTES =================
+// payoutRoute has specific paths under /rider/... (banks, bank-details,
+// earnings) that were silently shadowed by rideRoute's GET /rider/:id
+// wildcard when rideRoute was mounted first — Express matches routes in
+// registration order, so "/rider/earnings" was matching :id="earnings"
+// and hitting getRiderById (Rider.findById("earnings") → CastError → a
+// generic 500 with no useful log, from a completely different handler than
+// intended). Specific routes now mount before the wildcard-containing ones.
 app.get("/", (_, res) => res.send("🚀 Server is running"));
 app.use("/api", authRoute);
+app.use("/api", payoutRoute);
+app.use("/api", walletRoute);
+app.use("/api", paymentRoute);
+app.use("/api", pushRoute);
 app.use("/api", rideRoute);
 app.use("/api", riderRoute);
 app.use("/api", percelRoute);
 app.use("/api/carpool", carpoolRoute);
-app.use("/api", walletRoute);
-app.use("/api", paymentRoute);
-app.use("/api", payoutRoute);
-app.use("/api", pushRoute);
 
 // ================= GLOBAL ERROR HANDLER =================
 // Catches anything a route/middleware passes to next(err) or throws

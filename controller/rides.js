@@ -8,6 +8,7 @@ const User = require("../model/user");
 const Wallet = require("../model/wallet");
 const Transaction = require("../model/transaction");
 const DriverEarning = require("../model/driverEarning");
+const DriverCommission = require("../model/driverCommission");
 const axios = require("axios");
 const { initializeTransaction } = require("../utils/paystack");
 const { PLATFORM_COMMISSION_RATE } = require("../config/earnings");
@@ -104,25 +105,45 @@ const dispatchRideToDrivers = async (rideDoc) => {
 // finished and paid for. The unique index on `ride` makes this safe to call
 // from both the REST completeRide endpoint and the socket endTrip handler
 // without risking a duplicate payout entry.
+//
+// Branches on paymentMethod: wallet/paystack rides mean the platform
+// collected the money, so it owes the driver a payout (DriverEarning).
+// cash/transfer rides mean the *driver* collected the money directly from
+// the customer, so it's the reverse — the driver owes the platform its
+// commission (DriverCommission). Same commission math either way, opposite
+// direction of who owes whom.
 const settleDriverEarning = async (rideDoc) => {
   if (!rideDoc.driver || rideDoc.paymentStatus !== "paid") return;
 
   const commissionRate = PLATFORM_COMMISSION_RATE;
   const commissionAmount = Math.round(rideDoc.basePrice * commissionRate);
-  const netEarning = rideDoc.basePrice - commissionAmount;
+
+  const isDirectToDriver =
+    rideDoc.paymentMethod === "cash" || rideDoc.paymentMethod === "transfer";
 
   try {
-    await DriverEarning.create({
-      driver: rideDoc.driver,
-      ride: rideDoc._id,
-      grossAmount: rideDoc.basePrice,
-      commissionRate,
-      commissionAmount,
-      netEarning,
-    });
+    if (isDirectToDriver) {
+      await DriverCommission.create({
+        driver: rideDoc.driver,
+        ride: rideDoc._id,
+        grossAmount: rideDoc.basePrice,
+        commissionRate,
+        commissionAmount,
+      });
+    } else {
+      const netEarning = rideDoc.basePrice - commissionAmount;
+      await DriverEarning.create({
+        driver: rideDoc.driver,
+        ride: rideDoc._id,
+        grossAmount: rideDoc.basePrice,
+        commissionRate,
+        commissionAmount,
+        netEarning,
+      });
+    }
   } catch (err) {
     if (err.code === 11000) return; // already settled for this ride — ignore
-    console.error("Failed to create driver earning ledger row:", err.message);
+    console.error("Failed to create driver settlement ledger row:", err.message);
   }
 };
 
@@ -182,10 +203,13 @@ const bookRide = async (req, res) => {
       });
     }
 
-    if (!["wallet", "paystack"].includes(paymentMethod)) {
+    // Wallet/Paystack accepted in the API for when they're switched back on
+    // (business verification pending) — the booking UI currently only
+    // offers cash/transfer.
+    if (!["wallet", "paystack", "cash", "transfer"].includes(paymentMethod)) {
       return res.status(400).json({
         success: false,
-        message: "paymentMethod must be 'wallet' or 'paystack'",
+        message: "paymentMethod must be 'wallet', 'paystack', 'cash', or 'transfer'",
       });
     }
 
@@ -303,6 +327,38 @@ const bookRide = async (req, res) => {
     });
 
     console.log(`📝 Ride created: ${ride._id} (payment: ${paymentMethod})`);
+
+    if (paymentMethod === "cash" || paymentMethod === "transfer") {
+      // Money never touches the platform here — the customer pays the
+      // driver directly. Nothing to collect or verify, so dispatch
+      // immediately. paymentStatus "paid" here means "nothing pending that
+      // blocks dispatch/settlement", not literally "the platform holds the
+      // money" — settleDriverEarning() branches on paymentMethod to create
+      // a commission debt (driver owes platform) instead of a payout
+      // (platform owes driver) for these two methods.
+      ride.paymentStatus = "paid";
+      await ride.save();
+
+      const { notifiedCount } = await dispatchRideToDrivers(ride);
+
+      return res.status(200).json({
+        success: true,
+        message: `Ride request sent to ${notifiedCount} nearby drivers. Pay your driver directly by ${paymentMethod === "cash" ? "cash" : "bank transfer"}.`,
+        ride: {
+          _id: ride._id,
+          status: ride.status,
+          paymentStatus: ride.paymentStatus,
+          paymentMethod: ride.paymentMethod,
+          driver: ride.driver,
+          pickup: ride.pickup,
+          destination: ride.destination,
+          fare: ride.basePrice,
+          distance: ride.distance,
+          duration: ride.duration,
+        },
+        driversNotified: notifiedCount,
+      });
+    }
 
     if (paymentMethod === "wallet") {
       // Debit, ledger entry, and marking the ride paid all need to happen

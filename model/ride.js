@@ -118,9 +118,14 @@ const rideSchema = new mongoose.Schema(
       },
     ],
 
+    // "wallet"/"paystack" stay in the enum (currently switched off in the
+    // booking UI, not removed — code path still exists for when Paystack
+    // business verification is done). "cash"/"transfer" are paid directly
+    // to the driver, outside the platform, settled via commission debt —
+    // see model/driverCommission.js.
     paymentMethod: {
       type: String,
-      enum: ["wallet", "paystack"],
+      enum: ["wallet", "paystack", "cash", "transfer"],
       default: null,
     },
 

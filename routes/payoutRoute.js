@@ -7,6 +7,8 @@ const {
   triggerSettlement,
   getPayoutBatches,
   getDriverEarnings,
+  getOutstandingCommissions,
+  settleDriverCommission,
 } = require("../controller/payout");
 
 // Driver-facing
@@ -17,5 +19,17 @@ router.get("/rider/earnings", authenticateToken, getDriverEarnings);
 // Admin-facing
 router.post("/admin/payouts/run", authenticateToken, authorizeRole("admin"), triggerSettlement);
 router.get("/admin/payouts", authenticateToken, authorizeRole("admin"), getPayoutBatches);
+router.get(
+  "/admin/commissions",
+  authenticateToken,
+  authorizeRole("admin"),
+  getOutstandingCommissions,
+);
+router.post(
+  "/admin/commissions/:driverId/settle",
+  authenticateToken,
+  authorizeRole("admin"),
+  settleDriverCommission,
+);
 
 module.exports = router;
