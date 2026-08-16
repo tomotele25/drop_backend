@@ -11,6 +11,7 @@ const {
   markArrivedAtPickup,
   markPickedUp,
   completeRide,
+  rateRide,
 } = require("../controller/rides");
 const {authenticateToken,ridersOnly} = require("../middleware/riders")
 const { bookingLimiter } = require("../middleware/rateLimit");
@@ -35,6 +36,7 @@ router.post("/ride/:id/cancel", authenticateToken, cancelRide);
 router.post("/ride/:id/arrived", authenticateToken, markArrivedAtPickup);
 router.post("/ride/:id/picked-up", authenticateToken, markPickedUp);
 router.post("/ride/:id/complete", authenticateToken, completeRide);
+router.post("/ride/:id/rate", authenticateToken, rateRide);
 
 router.post("/autocomplete", bookingLimiter, getAutocompleteSuggestions);
 

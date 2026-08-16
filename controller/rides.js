@@ -1021,6 +1021,47 @@ const completeRide = async (req, res) => {
   }
 };
 
+// Lets the passenger rate a completed ride. Only the passenger who took
+// the ride can rate it, only once it's actually completed, and rating is
+// one-shot (no overwriting a previous rating via this endpoint).
+const rateRide = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rating, review } = req.body || {};
+
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      return res.status(400).json({ success: false, message: "rating must be an integer 1-5" });
+    }
+
+    const ride = await Ride.findById(id);
+    if (!ride) {
+      return res.status(404).json({ success: false, message: "Ride not found" });
+    }
+
+    const isPassenger = ride.passengers.some(
+      (p) => p.userId?.toString() === req.user.id,
+    );
+    if (!isPassenger) {
+      return res.status(403).json({ success: false, message: "Not authorized" });
+    }
+    if (ride.status !== "completed") {
+      return res.status(409).json({ success: false, message: "Ride is not completed yet" });
+    }
+    if (ride.rating != null) {
+      return res.status(409).json({ success: false, message: "Ride already rated" });
+    }
+
+    ride.rating = rating;
+    if (review) ride.review = review;
+    await ride.save();
+
+    return res.status(200).json({ success: true, ride });
+  } catch (error) {
+    console.error("Rate ride error:", error);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
 module.exports = {
   bookRide,
   getAutocompleteSuggestions,
@@ -1034,6 +1075,7 @@ module.exports = {
   markArrivedAtPickup,
   markPickedUp,
   completeRide,
+  rateRide,
   dispatchRideToDrivers,
   settleDriverEarning,
   expireStalePendingRides,
