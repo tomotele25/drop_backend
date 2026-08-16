@@ -571,6 +571,35 @@ const getAutocompleteSuggestions = async (req, res) => {
   }
 };
 
+// ================= GEOCODE (single address → lat/lng) =================
+// Autocomplete only returns place_id/description (no coordinates — that's
+// how Google's Autocomplete API works), so the mobile map needs this to
+// place an accurate pin as soon as pickup or destination is picked, before
+// both are known (bookRide/getRouteAndRides only geocode once you already
+// have a full pickup+destination pair).
+const geocodeAddress = async (req, res) => {
+  try {
+    const { address } = req.body || {};
+    if (!address) {
+      return res.status(400).json({ success: false, message: "address is required" });
+    }
+
+    const geo = await axios.get("https://maps.googleapis.com/maps/api/geocode/json", {
+      params: { address, key: process.env.GOOGLE_MAPS_API_KEY },
+    });
+
+    if (geo.data.status !== "OK") {
+      return res.status(400).json({ success: false, message: "Could not resolve address" });
+    }
+
+    const { lat, lng } = geo.data.results[0].geometry.location;
+    return res.status(200).json({ success: true, lat, lng });
+  } catch (error) {
+    console.error("Geocode error:", error);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
 // ================= ROUTE + FARES =================
 const getRouteAndRides = async (req, res) => {
   try {
@@ -1076,6 +1105,7 @@ module.exports = {
   markPickedUp,
   completeRide,
   rateRide,
+  geocodeAddress,
   dispatchRideToDrivers,
   settleDriverEarning,
   expireStalePendingRides,

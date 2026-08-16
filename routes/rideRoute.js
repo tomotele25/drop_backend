@@ -12,6 +12,7 @@ const {
   markPickedUp,
   completeRide,
   rateRide,
+  geocodeAddress,
 } = require("../controller/rides");
 const {authenticateToken,ridersOnly} = require("../middleware/riders")
 const { bookingLimiter } = require("../middleware/rateLimit");
@@ -39,6 +40,8 @@ router.post("/ride/:id/complete", authenticateToken, completeRide);
 router.post("/ride/:id/rate", authenticateToken, rateRide);
 
 router.post("/autocomplete", bookingLimiter, getAutocompleteSuggestions);
+
+router.post("/geocode", bookingLimiter, geocodeAddress);
 
 router.post("/route-and-rides", bookingLimiter, getRouteAndRides);
 
