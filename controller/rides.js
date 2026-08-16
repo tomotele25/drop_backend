@@ -107,6 +107,19 @@ const backfillDriverLocations = async (req, res) => {
   }
 };
 
+// TEMPORARY diagnostic for the stale-location investigation — read-only,
+// remove once the root cause is confirmed and fixed.
+const debugDriverLocations = async (req, res) => {
+  try {
+    const drivers = await Rider.find({ isActive: true }).select(
+      "fullname isActive currentLocation location",
+    );
+    return res.status(200).json({ success: true, drivers });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // Shared by both the wallet path (dispatches immediately after booking) and
 // the Paystack webhook (dispatches only once payment is confirmed).
 const dispatchRideToDrivers = async (rideDoc) => {
@@ -1164,6 +1177,7 @@ module.exports = {
   rateRide,
   geocodeAddress,
   backfillDriverLocations,
+  debugDriverLocations,
   dispatchRideToDrivers,
   settleDriverEarning,
   expireStalePendingRides,

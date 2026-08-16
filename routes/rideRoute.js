@@ -14,6 +14,7 @@ const {
   rateRide,
   geocodeAddress,
   backfillDriverLocations,
+  debugDriverLocations,
 } = require("../controller/rides");
 const {authenticateToken,ridersOnly} = require("../middleware/riders")
 const { bookingLimiter } = require("../middleware/rateLimit");
@@ -53,5 +54,7 @@ router.post(
   authorizeRole("admin"),
   backfillDriverLocations,
 );
+
+router.get("/admin/debug-driver-locations", authenticateToken, debugDriverLocations);
 
 module.exports = router;
