@@ -13,9 +13,11 @@ const {
   completeRide,
   rateRide,
   geocodeAddress,
+  backfillDriverLocations,
 } = require("../controller/rides");
 const {authenticateToken,ridersOnly} = require("../middleware/riders")
 const { bookingLimiter } = require("../middleware/rateLimit");
+const authorizeRole = require("../middleware/role");
 const express = require("express");
 
 const router = express.Router();
@@ -44,5 +46,12 @@ router.post("/autocomplete", bookingLimiter, getAutocompleteSuggestions);
 router.post("/geocode", bookingLimiter, geocodeAddress);
 
 router.post("/route-and-rides", bookingLimiter, getRouteAndRides);
+
+router.post(
+  "/admin/backfill-driver-locations",
+  authenticateToken,
+  authorizeRole("admin"),
+  backfillDriverLocations,
+);
 
 module.exports = router;

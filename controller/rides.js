@@ -36,6 +36,33 @@ const findAvailableNearbyDrivers = async (pickupLoc, radiusKm = 10) => {
     status: { $in: ["ongoing", "accepted", "arrived"] },
   }).distinct("driver");
 
+  // Self-heal: `location` (the GeoJSON field $near actually queries) and
+  // `currentLocation` (the flat lat/lng field shown elsewhere, e.g.
+  // getAvailableRider) are supposed to be written together, but any Rider
+  // document created before `location` existed on the schema has it stuck
+  // at the default [0,0] — ~780km from Lagos, so it silently never matches
+  // $near even though the driver is genuinely online with a real
+  // currentLocation. Backfill those before matching so a driver who's
+  // active right now isn't invisible to dispatch until their next socket
+  // reconnect.
+  await Rider.updateMany(
+    {
+      isActive: true,
+      "location.coordinates": [0, 0],
+      "currentLocation.latitude": { $ne: 0 },
+    },
+    [
+      {
+        $set: {
+          location: {
+            type: "Point",
+            coordinates: ["$currentLocation.longitude", "$currentLocation.latitude"],
+          },
+        },
+      },
+    ],
+  );
+
   const availableDrivers = await Rider.find({
     isActive: true,
     _id: { $nin: busyDriverIds },
@@ -48,6 +75,36 @@ const findAvailableNearbyDrivers = async (pickupLoc, radiusKm = 10) => {
   });
 
   return availableDrivers;
+};
+
+// Admin-triggerable version of the self-heal step in
+// findAvailableNearbyDrivers, so currently-online drivers with a stale
+// `location` field can be fixed immediately instead of waiting for the
+// next ride booking to implicitly backfill them.
+const backfillDriverLocations = async (req, res) => {
+  try {
+    const result = await Rider.updateMany(
+      {
+        isActive: true,
+        "location.coordinates": [0, 0],
+        "currentLocation.latitude": { $ne: 0 },
+      },
+      [
+        {
+          $set: {
+            location: {
+              type: "Point",
+              coordinates: ["$currentLocation.longitude", "$currentLocation.latitude"],
+            },
+          },
+        },
+      ],
+    );
+    return res.status(200).json({ success: true, matched: result.matchedCount, modified: result.modifiedCount });
+  } catch (error) {
+    console.error("Backfill driver locations error:", error);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
 };
 
 // Shared by both the wallet path (dispatches immediately after booking) and
@@ -1106,6 +1163,7 @@ module.exports = {
   completeRide,
   rateRide,
   geocodeAddress,
+  backfillDriverLocations,
   dispatchRideToDrivers,
   settleDriverEarning,
   expireStalePendingRides,
