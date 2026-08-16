@@ -734,6 +734,35 @@ const getTotalRides = async (req, res) => {
   }
 };
 
+// Customer-facing ride history — rides the given user is a passenger on
+// (as opposed to getTotalRides above, which is the driver's ride history).
+const getCustomerRides = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!id) {
+      return res.status(404).json({ success: false, message: "Id not found" });
+    }
+
+    const isAdmin = req.user?.role === "admin";
+    const isSelf = req.user?.id === id;
+    if (!isAdmin && !isSelf) {
+      return res.status(403).json({ success: false, message: "Not authorized" });
+    }
+
+    const rides = await Ride.find({ "passengers.userId": id }).sort({ createdAt: -1 });
+
+    return res.status(200).json({
+      success: true,
+      message: "Rides found successfully",
+      rides,
+    });
+  } catch (error) {
+    console.error("Error fetching customer rides:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 
 // ================= CANCEL RIDE =================
 // Customer, the assigned driver, or an admin can cancel — but only while the
@@ -969,6 +998,7 @@ module.exports = {
   getRiderById,
   getRideById,
   getTotalRides,
+  getCustomerRides,
   cancelRide,
   markArrivedAtPickup,
   markPickedUp,

@@ -6,6 +6,7 @@ const {
   getRiderById,
   getAutocompleteSuggestions,
   getTotalRides,
+  getCustomerRides,
   cancelRide,
   markArrivedAtPickup,
   markPickedUp,
@@ -25,6 +26,8 @@ router.get("/availableRides", getAvailableRider);
 
 router.get("/rider/:id", getRiderById);
 
+
+router.get("/rides/customer/:id", authenticateToken, getCustomerRides)
 
 router.get("/rides/:id", authenticateToken, getTotalRides)
 
