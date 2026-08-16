@@ -24,7 +24,7 @@ const { runDailySettlement } = require("../controller/payout");
 
 // Models
 const Ride = require("../model/ride");
-const { settleDriverEarning, expireStalePendingRides } = require("../controller/rides");
+const { settleDriverEarning, expireStalePendingRides, expireStuckActiveRides } = require("../controller/rides");
 const Rider = require("../model/rider");
 const CarpoolRoom = require("../model/carpool");
 
@@ -119,6 +119,18 @@ cron.schedule("*/30 * * * * *", async () => {
     await expireStalePendingRides();
   } catch (err) {
     console.error("❌ Ride expiry sweep failed:", err.message);
+  }
+});
+
+// ================= STUCK ACTIVE-RIDE EXPIRY =================
+// Every 5 minutes, auto-cancel any ride that's been matched to a driver
+// but never completed — otherwise an abandoned trip permanently excludes
+// that driver from all future dispatch (see STUCK_ACTIVE_RIDE_TIMEOUT_MS).
+cron.schedule("*/5 * * * *", async () => {
+  try {
+    await expireStuckActiveRides();
+  } catch (err) {
+    console.error("❌ Stuck active-ride sweep failed:", err.message);
   }
 });
 

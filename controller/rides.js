@@ -12,7 +12,7 @@ const DriverCommission = require("../model/driverCommission");
 const axios = require("axios");
 const { initializeTransaction } = require("../utils/paystack");
 const { PLATFORM_COMMISSION_RATE } = require("../config/earnings");
-const { RIDE_OFFER_TIMEOUT_MS } = require("../config/dispatch");
+const { RIDE_OFFER_TIMEOUT_MS, STUCK_ACTIVE_RIDE_TIMEOUT_MS } = require("../config/dispatch");
 const { sendPushToUser } = require("../utils/webpush");
 const { sendExpoPushToUser } = require("../utils/expoPush");
 
@@ -104,6 +104,21 @@ const backfillDriverLocations = async (req, res) => {
   } catch (error) {
     console.error("Backfill driver locations error:", error);
     return res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+// Admin-triggerable version of expireStuckActiveRides, so it can be run
+// immediately (e.g. right after deploying this fix) instead of waiting on
+// the cron — which, per the note on the daily-settlement cron in
+// api/server.js, only reliably fires on the long-running Render deployment,
+// not on Vercel's serverless one.
+const runStuckActiveRideCleanup = async (req, res) => {
+  try {
+    const result = await expireStuckActiveRides();
+    return res.status(200).json({ success: true, ...result });
+  } catch (error) {
+    console.error("Stuck active-ride cleanup error:", error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -263,6 +278,38 @@ const expireStalePendingRides = async () => {
   }
 
   console.log(`⏱️ Expired ${staleRides.length} stale pending ride(s)`);
+};
+
+// Auto-cancels a ride that's been matched to a driver (accepted/arrived/
+// ongoing) but never completed within a generous ceiling — an abandoned
+// trip otherwise sidelines its driver from all future dispatch forever,
+// since findAvailableNearbyDrivers excludes any driver with a ride in one
+// of these statuses with no way for that exclusion to ever clear.
+const expireStuckActiveRides = async () => {
+  const cutoff = new Date(Date.now() - STUCK_ACTIVE_RIDE_TIMEOUT_MS);
+  const stuckRides = await Ride.find({
+    status: { $in: ["accepted", "arrived", "ongoing"] },
+    createdAt: { $lt: cutoff },
+  });
+
+  if (stuckRides.length === 0) return { cancelled: 0 };
+
+  await Ride.updateMany(
+    { _id: { $in: stuckRides.map((r) => r._id) } },
+    {
+      status: "cancelled",
+      cancelledBy: "admin",
+      cancelReason: "Auto-cancelled: ride sat active too long with no completion",
+      cancelledAt: new Date(),
+    },
+  );
+
+  for (const stuckRide of stuckRides) {
+    global.rideOffers?.delete(stuckRide._id.toString());
+  }
+
+  console.log(`⏱️ Auto-cancelled ${stuckRides.length} stuck active ride(s)`);
+  return { cancelled: stuckRides.length };
 };
 
 const bookRide = async (req, res) => {
@@ -1181,6 +1228,8 @@ module.exports = {
   geocodeAddress,
   backfillDriverLocations,
   debugDriverLocations,
+  expireStuckActiveRides,
+  runStuckActiveRideCleanup,
   dispatchRideToDrivers,
   settleDriverEarning,
   expireStalePendingRides,

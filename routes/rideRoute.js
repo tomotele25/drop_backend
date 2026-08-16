@@ -15,6 +15,7 @@ const {
   geocodeAddress,
   backfillDriverLocations,
   debugDriverLocations,
+  runStuckActiveRideCleanup,
 } = require("../controller/rides");
 const {authenticateToken,ridersOnly} = require("../middleware/riders")
 const { bookingLimiter } = require("../middleware/rateLimit");
@@ -56,5 +57,10 @@ router.post(
 );
 
 router.get("/admin/debug-driver-locations", authenticateToken, debugDriverLocations);
+
+// TEMPORARY: gated to any authenticated user (not admin-only) so it can be
+// verified with a regular test account first, then locked to
+// authorizeRole("admin") once confirmed.
+router.post("/admin/cleanup-stuck-rides", authenticateToken, runStuckActiveRideCleanup);
 
 module.exports = router;
