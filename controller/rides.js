@@ -114,7 +114,10 @@ const debugDriverLocations = async (req, res) => {
     const drivers = await Rider.find({ isActive: true }).select(
       "fullname isActive currentLocation location",
     );
-    return res.status(200).json({ success: true, drivers });
+    const busyRides = await Ride.find({
+      status: { $in: ["ongoing", "accepted", "arrived"] },
+    }).select("driver status pickup createdAt");
+    return res.status(200).json({ success: true, drivers, busyRides });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }
