@@ -7,6 +7,7 @@ const jwt = require("jsonwebtoken");
 const { Server } = require("socket.io");
 const connectToDb = require("../database/db");
 const { createOfferStore } = require("../utils/offerStore");
+const { sendExpoPushToUser } = require("../utils/expoPush");
 
 // Routes
 const authRoute = require("../routes/authRoute");
@@ -18,6 +19,7 @@ const walletRoute = require("../routes/walletRoute");
 const paymentRoute = require("../routes/paymentRoute");
 const payoutRoute = require("../routes/payoutRoute");
 const pushRoute = require("../routes/pushRoute");
+const notificationRoute = require("../routes/notificationRoute");
 const { runDailySettlement } = require("../controller/payout");
 
 // Models
@@ -73,6 +75,7 @@ app.use("/api", payoutRoute);
 app.use("/api", walletRoute);
 app.use("/api", paymentRoute);
 app.use("/api", pushRoute);
+app.use("/api", notificationRoute);
 app.use("/api", rideRoute);
 app.use("/api", riderRoute);
 app.use("/api", percelRoute);
@@ -791,6 +794,12 @@ io.on("connection", (socket) => {
             message: "Your driver has arrived!",
             ride,
           });
+        sendExpoPushToUser(passengerId, {
+          title: "Your driver has arrived",
+          body: `Your driver is waiting at ${ride.pickup}`,
+          url: `/ride/${ride._id.toString()}`,
+          rideId: ride._id.toString(),
+        }).catch((err) => console.error("Expo push (arrived) error:", err.message));
       }
     } catch (err) {
       console.error("❌ Arrived at pickup error:", err.message);
@@ -825,6 +834,12 @@ io.on("connection", (socket) => {
             message: "Trip in progress",
             ride,
           });
+        sendExpoPushToUser(passengerId, {
+          title: "Trip started",
+          body: `You're on your way to ${ride.destination}`,
+          url: `/ride/${ride._id.toString()}`,
+          rideId: ride._id.toString(),
+        }).catch((err) => console.error("Expo push (ongoing) error:", err.message));
       }
     } catch (err) {
       console.error("❌ Start trip error:", err.message);
@@ -859,6 +874,12 @@ io.on("connection", (socket) => {
             message: "Your ride is complete",
             ride,
           });
+        sendExpoPushToUser(passengerId, {
+          title: "Trip completed",
+          body: `You've arrived at ${ride.destination}`,
+          url: `/ride/${ride._id.toString()}`,
+          rideId: ride._id.toString(),
+        }).catch((err) => console.error("Expo push (completed) error:", err.message));
       }
     } catch (err) {
       console.error("❌ End trip error:", err.message);

@@ -14,6 +14,7 @@ const { initializeTransaction } = require("../utils/paystack");
 const { PLATFORM_COMMISSION_RATE } = require("../config/earnings");
 const { RIDE_OFFER_TIMEOUT_MS } = require("../config/dispatch");
 const { sendPushToUser } = require("../utils/webpush");
+const { sendExpoPushToUser } = require("../utils/expoPush");
 
 // Thrown inside a transaction to abort it cleanly and distinguish "not
 // enough balance" (an expected, user-facing case) from a real DB error.
@@ -89,12 +90,18 @@ const dispatchRideToDrivers = async (rideDoc) => {
     // that can still reach a driver whose tab isn't focused. Fire-and-forget:
     // a push failure shouldn't block dispatching to the rest of the drivers.
     if (driver.user) {
-      sendPushToUser(driver.user, {
+      const pushPayload = {
         title: "New ride request",
         body: `${rideDoc.pickup} → ${rideDoc.destination} · ₦${rideDoc.basePrice}`,
         url: `/ride/${rideDoc._id.toString()}`,
         rideId: rideDoc._id.toString(),
-      }).catch((err) => console.error("Push dispatch error:", err.message));
+      };
+      sendPushToUser(driver.user, pushPayload).catch((err) =>
+        console.error("Push dispatch error:", err.message),
+      );
+      sendExpoPushToUser(driver.user, pushPayload).catch((err) =>
+        console.error("Expo push dispatch error:", err.message),
+      );
     }
   }
 
@@ -916,6 +923,14 @@ const markArrivedAtPickup = async (req, res) => {
         global.io.to(riderSocketId).emit("driverArrived", { rideId: ride._id.toString(), ride });
       }
     }
+    if (passengerId) {
+      sendExpoPushToUser(passengerId, {
+        title: "Your driver has arrived",
+        body: `Your driver is waiting at ${ride.pickup}`,
+        url: `/ride/${ride._id.toString()}`,
+        rideId: ride._id.toString(),
+      }).catch((err) => console.error("Expo push (arrived) error:", err.message));
+    }
 
     return res.status(200).json({ success: true, ride });
   } catch (error) {
@@ -947,6 +962,14 @@ const markPickedUp = async (req, res) => {
       if (riderSocketId) {
         global.io.to(riderSocketId).emit("rideOngoing", { rideId: ride._id.toString(), ride });
       }
+    }
+    if (passengerId) {
+      sendExpoPushToUser(passengerId, {
+        title: "Trip started",
+        body: `You're on your way to ${ride.destination}`,
+        url: `/ride/${ride._id.toString()}`,
+        rideId: ride._id.toString(),
+      }).catch((err) => console.error("Expo push (ongoing) error:", err.message));
     }
 
     return res.status(200).json({ success: true, ride });
@@ -981,6 +1004,14 @@ const completeRide = async (req, res) => {
       if (riderSocketId) {
         global.io.to(riderSocketId).emit("rideCompleted", { rideId: ride._id.toString(), ride });
       }
+    }
+    if (passengerId) {
+      sendExpoPushToUser(passengerId, {
+        title: "Trip completed",
+        body: `You've arrived at ${ride.destination}`,
+        url: `/ride/${ride._id.toString()}`,
+        rideId: ride._id.toString(),
+      }).catch((err) => console.error("Expo push (completed) error:", err.message));
     }
 
     return res.status(200).json({ success: true, ride });
