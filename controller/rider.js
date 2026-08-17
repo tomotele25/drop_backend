@@ -63,12 +63,20 @@ const createRider = async (req, res) => {
       });
     }
 
-    // Check if profile image was uploaded
-    const profileImg = req.file?.path;
-    if (!profileImg) {
+    // Required verification photos — driver's face, the vehicle, the
+    // license document, and the plate itself. Uploaded via upload.fields()
+    // (see routes/riderRoute.js), so each shows up as req.files[field][0]
+    // rather than req.file.
+    const profileImg = req.files?.profileImg?.[0]?.path;
+    const vehiclePhoto = req.files?.vehiclePhoto?.[0]?.path;
+    const licensePhoto = req.files?.licensePhoto?.[0]?.path;
+    const plateNoPhoto = req.files?.plateNoPhoto?.[0]?.path;
+
+    if (!profileImg || !vehiclePhoto || !licensePhoto || !plateNoPhoto) {
       return res.status(400).json({
         success: false,
-        message: "Profile image is required",
+        message:
+          "Photos of you, your vehicle, your license, and your plate number are all required",
       });
     }
 
@@ -108,6 +116,9 @@ const createRider = async (req, res) => {
               carModel,
               plateNo,
               profileImg,
+              vehiclePhoto,
+              licensePhoto,
+              plateNoPhoto,
               contact,
               licenseNo,
               dob: dob || null,
@@ -259,6 +270,101 @@ const toggleRiderStatus = async (req, res) => {
   }
 };
 
+// Editable profile fields — deliberately excludes licenseNo, bvn and
+// emergencyContact, which are verification-sensitive and shouldn't be
+// self-editable without re-verification (matches how most ride-hailing
+// apps lock those fields post-onboarding).
+const EDITABLE_FIELDS = [
+  "fullname",
+  "email",
+  "contact",
+  "address",
+  "dob",
+  "carModel",
+  "carColor",
+  "plateNo",
+];
+
+// fullname/email/contact are duplicated on both User and Rider (a pre-
+// existing shape, not introduced here — see createRider), so both docs are
+// updated together in a transaction to keep them from drifting apart.
+const updateRiderProfile = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (req.user?.id !== id && req.user?.role !== "admin") {
+      return res.status(403).json({ success: false, message: "Not authorized" });
+    }
+
+    const rider = await Rider.findOne({ user: id });
+    if (!rider) {
+      return res.status(404).json({ success: false, message: "Rider profile not found" });
+    }
+
+    const updates = {};
+    for (const field of EDITABLE_FIELDS) {
+      if (req.body[field] !== undefined && req.body[field] !== "") {
+        updates[field] = req.body[field];
+      }
+    }
+    if (req.file?.path) {
+      updates.profileImg = req.file.path;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, message: "No changes provided" });
+    }
+
+    const userUpdates = {};
+    if (updates.fullname !== undefined) userUpdates.fullname = updates.fullname;
+    if (updates.email !== undefined) userUpdates.email = updates.email;
+    if (updates.contact !== undefined) userUpdates.contact = updates.contact;
+
+    let updatedRider;
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        Object.assign(rider, updates);
+        updatedRider = await rider.save({ session });
+
+        if (Object.keys(userUpdates).length > 0) {
+          await User.updateOne({ _id: id }, userUpdates, { session });
+        }
+      });
+    } finally {
+      session.endSession();
+    }
+
+    return res.status(200).json({
+      success: true,
+      rider: {
+        fullname: updatedRider.fullname,
+        email: updatedRider.email,
+        contact: updatedRider.contact,
+        address: updatedRider.address,
+        dob: updatedRider.dob,
+        carModel: updatedRider.carModel,
+        carColor: updatedRider.carColor,
+        plateNo: updatedRider.plateNo,
+        profileImg: updatedRider.profileImg,
+      },
+    });
+  } catch (error) {
+    console.error("Update rider profile error:", error.message);
+
+    if (error.name === "ValidationError") {
+      const errors = Object.values(error.errors).map((e) => e.message);
+      return res.status(400).json({ success: false, message: `Validation failed: ${errors.join(", ")}` });
+    }
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern || {})[0] || "field";
+      return res.status(400).json({ success: false, message: `${field} already in use` });
+    }
+
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
 // ================= PAYOUT BANK DETAILS =================
 
 const getBanks = async (_req, res) => {
@@ -333,6 +439,7 @@ module.exports = {
   createRider,
   getRiderStatus,
   toggleRiderStatus,
+  updateRiderProfile,
   getBanks,
   updateBankDetails,
 };

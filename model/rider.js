@@ -18,6 +18,14 @@ const riderSchema = new mongoose.Schema(
     carModel: { type: String, required: true },
     plateNo: { type: String, required: true, unique: true },
     profileImg: { type: String, default: "" },
+    // Required at signup for verification/safety (enforced in
+    // controller/rider.js createRider, same pattern as profileImg) —
+    // schema-level default rather than `required: true` so existing riders
+    // signed up before these fields existed don't fail validation on
+    // unrelated saves.
+    vehiclePhoto: { type: String, default: "" },
+    licensePhoto: { type: String, default: "" },
+    plateNoPhoto: { type: String, default: "" },
     contact: { type: String, required: true },
     licenseNo: { type: String, required: true },
     dob: { type: String, required: false },

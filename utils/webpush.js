@@ -41,7 +41,10 @@ const sendPushToUser = async (userId, payload) => {
   if (!vapidConfigured) return { sent: 0 };
 
   const subscriptions = await PushSubscription.find({ user: userId });
-  if (subscriptions.length === 0) return { sent: 0 };
+  if (subscriptions.length === 0) {
+    console.log(`[webpush] user ${userId} has no push subscriptions on file — nothing to send`);
+    return { sent: 0 };
+  }
 
   let sent = 0;
   await Promise.all(
@@ -66,6 +69,8 @@ const sendPushToUser = async (userId, payload) => {
       }
     }),
   );
+
+  console.log(`[webpush] user ${userId}: sent ${sent}/${subscriptions.length} subscription(s)`);
 
   return { sent };
 };

@@ -35,7 +35,10 @@ const sendExpoPushToUser = async (userId, payload) => {
   if (!expoConfigured) return { sent: 0 };
 
   const tokens = await ExpoPushToken.find({ user: userId });
-  if (tokens.length === 0) return { sent: 0 };
+  if (tokens.length === 0) {
+    console.log(`[expoPush] user ${userId} has no Expo push tokens on file — nothing to send`);
+    return { sent: 0 };
+  }
 
   const messages = [];
   for (const record of tokens) {
@@ -52,7 +55,10 @@ const sendExpoPushToUser = async (userId, payload) => {
     });
   }
 
-  if (messages.length === 0) return { sent: 0 };
+  if (messages.length === 0) {
+    console.log(`[expoPush] user ${userId}: all ${tokens.length} token(s) were invalid/expired and pruned`);
+    return { sent: 0 };
+  }
 
   let sent = 0;
   const chunks = expoClient.chunkPushNotifications(messages);
@@ -72,6 +78,8 @@ const sendExpoPushToUser = async (userId, payload) => {
       console.error(`Expo push send failed for user ${userId}:`, err.message);
     }
   }
+
+  console.log(`[expoPush] user ${userId}: sent ${sent}/${messages.length} message(s)`);
 
   return { sent };
 };

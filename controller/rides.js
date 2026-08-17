@@ -74,6 +74,10 @@ const findAvailableNearbyDrivers = async (pickupLoc, radiusKm = 10) => {
     },
   });
 
+  console.log(
+    `[dispatch] ${availableDrivers.length} driver(s) matched within ${radiusKm}km of pickup (${busyDriverIds.length} excluded as busy)`,
+  );
+
   return availableDrivers;
 };
 
@@ -125,26 +129,32 @@ const runStuckActiveRideCleanup = async (req, res) => {
 // Shared by both the wallet path (dispatches immediately after booking) and
 // the Paystack webhook (dispatches only once payment is confirmed).
 const dispatchRideToDrivers = async (rideDoc) => {
+  const rideId = rideDoc._id.toString();
   const nearbyDrivers = await findAvailableNearbyDrivers(
     rideDoc.pickupCoordinates,
     10,
   );
 
+  console.log(
+    `[dispatch] ride ${rideId}: dispatching to ${nearbyDrivers.length} matched driver(s)`,
+  );
+
   const driverIds = nearbyDrivers.map((d) => d._id.toString());
   global.rideOffers = global.rideOffers || new Map();
-  global.rideOffers.set(rideDoc._id.toString(), {
+  global.rideOffers.set(rideId, {
     offeredAt: Date.now(),
     offeredTo: driverIds,
     acceptedBy: null,
   });
 
   let notifiedCount = 0;
+  let pushEligibleCount = 0;
   for (const driver of nearbyDrivers) {
     const driverId = driver._id.toString();
     const socketId = global.driverSockets?.get(driverId);
     if (socketId) {
       global.io.to(socketId).emit("rideAssigned", {
-        rideId: rideDoc._id.toString(),
+        rideId,
         pickup: rideDoc.pickup,
         destination: rideDoc.destination,
         pickupCoordinates: rideDoc.pickupCoordinates,
@@ -162,20 +172,40 @@ const dispatchRideToDrivers = async (rideDoc) => {
     // that can still reach a driver whose tab isn't focused. Fire-and-forget:
     // a push failure shouldn't block dispatching to the rest of the drivers.
     if (driver.user) {
+      pushEligibleCount++;
       const pushPayload = {
         title: "New ride request",
         body: `${rideDoc.pickup} → ${rideDoc.destination} · ₦${rideDoc.basePrice}`,
-        url: `/ride/${rideDoc._id.toString()}`,
-        rideId: rideDoc._id.toString(),
+        url: `/ride/${rideId}`,
+        rideId,
       };
-      sendPushToUser(driver.user, pushPayload).catch((err) =>
-        console.error("Push dispatch error:", err.message),
-      );
-      sendExpoPushToUser(driver.user, pushPayload).catch((err) =>
-        console.error("Expo push dispatch error:", err.message),
+      sendPushToUser(driver.user, pushPayload)
+        .then(({ sent }) =>
+          console.log(`[dispatch] ride ${rideId}: web-push to driver ${driverId} → sent=${sent}`),
+        )
+        .catch((err) =>
+          console.error(`[dispatch] ride ${rideId}: web-push error for driver ${driverId}:`, err.message),
+        );
+      sendExpoPushToUser(driver.user, pushPayload)
+        .then(({ sent }) =>
+          console.log(`[dispatch] ride ${rideId}: Expo push to driver ${driverId} → sent=${sent}`),
+        )
+        .catch((err) =>
+          console.error(`[dispatch] ride ${rideId}: Expo push error for driver ${driverId}:`, err.message),
+        );
+    } else {
+      // Same class of gap the `location` self-heal above guards against —
+      // a Rider doc without a `user` ref (e.g. a legacy/seeded record) has
+      // no push channel at all and was previously skipped with zero trace.
+      console.warn(
+        `[dispatch] ride ${rideId}: driver ${driverId} matched but has no \`user\` field — no push channel available for them`,
       );
     }
   }
+
+  console.log(
+    `[dispatch] ride ${rideId}: summary — ${nearbyDrivers.length} matched, ${notifiedCount} had a live socket, ${pushEligibleCount} eligible for push`,
+  );
 
   return { nearbyDrivers, notifiedCount };
 };
