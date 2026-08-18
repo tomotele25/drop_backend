@@ -1,0 +1,20 @@
+name: Keep backend warm
+
+# Render's free tier spins the server down after ~15 minutes with no
+# incoming requests, so the next real request pays a 20-50s cold-start
+# penalty — which is what was making the autocomplete look like it "stopped
+# working" (the request timed out mid-wake-up and the app silently treated
+# that failure as "no results found"). A ping well under that 15-minute
+# window keeps it always warm, at zero cost — GitHub Actions' free tier
+# easily covers a job this small and infrequent.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping backend health endpoint
+        run: curl -sf --max-time 30 https://drop-backend-6qvk.onrender.com/ || true
