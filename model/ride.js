@@ -46,8 +46,8 @@ const rideSchema = new mongoose.Schema(
     // Ride type
     rideType: {
       type: String,
-      enum: ["Standard", "Premium", "Comfort"],
-      default: "standard",
+      enum: ["Basic", "Comfort", "Premium"],
+      default: "Basic",
     },
 
     // Base price

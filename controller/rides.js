@@ -814,7 +814,8 @@ const getRouteAndRides = async (req, res) => {
         rates: pricing,
       });
 
-    const standardEstimate = estimateFor("standard");
+    const basicEstimate = estimateFor("basic");
+    const comfortEstimate = estimateFor("comfort");
     const premiumEstimate = estimateFor("premium");
 
     return res.json({
@@ -824,11 +825,12 @@ const getRouteAndRides = async (req, res) => {
       distanceKm,
       durationMinutes,
       fares: {
-        standard: standardEstimate.basePrice,
+        basic: basicEstimate.basePrice,
+        comfort: comfortEstimate.basePrice,
         premium: premiumEstimate.basePrice,
       },
-      surgeMultiplier: standardEstimate.surgeMultiplier,
-      surgeReason: standardEstimate.breakdown.reason,
+      surgeMultiplier: basicEstimate.surgeMultiplier,
+      surgeReason: basicEstimate.breakdown.reason,
     });
   } catch (error) {
     console.error(error);

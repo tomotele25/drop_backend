@@ -7,7 +7,8 @@ const mongoose = require("mongoose");
 const pricingConfigSchema = new mongoose.Schema(
   {
     baseFares: {
-      standard: { type: Number, required: true },
+      basic: { type: Number, required: true },
+      comfort: { type: Number, required: true },
       premium: { type: Number, required: true },
     },
     perKm: { type: Number, required: true },

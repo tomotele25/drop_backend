@@ -14,7 +14,7 @@ const getPricing = async (req, res) => {
   }
 };
 
-const RIDE_TYPES = ["standard", "premium"];
+const RIDE_TYPES = ["basic", "comfort", "premium"];
 
 // PATCH /api/admin/pricing — admin-only. Validates the shape/sanity of
 // every field before saving, since a bad value here (e.g. a negative

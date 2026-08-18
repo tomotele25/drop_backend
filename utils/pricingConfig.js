@@ -14,7 +14,12 @@ function toPlainRates(doc) {
   const obj = doc.toObject ? doc.toObject() : doc;
   return {
     _id: obj._id,
-    baseFares: obj.baseFares,
+    // A live doc saved before the "basic"/"comfort" rename (when this only
+    // had "standard"/"premium") won't have those keys at all — merging
+    // over the current defaults means a missing tier falls back to a real
+    // number instead of `undefined` silently turning every fare into NaN.
+    // Re-saving from the admin dashboard overwrites this with real values.
+    baseFares: { ...DEFAULTS.BASE_FARES, ...obj.baseFares },
     perKm: obj.perKm,
     perMinute: obj.perMinute,
     minDriverNetPayout: obj.minDriverNetPayout,

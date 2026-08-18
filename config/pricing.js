@@ -6,16 +6,14 @@
 // on short trips, where the payout floor was the thin part), while the
 // per-km/per-minute bump is modest enough that riders are paying for
 // comfort/reliability, not getting gouged.
-const BASE_FARES = { standard: 500, premium: 1000 };
-const PER_KM = 165; // was 149
-const PER_MINUTE = 26; // was 22
+const BASE_FARES = { basic: 1100, comfort: 2200, premium: 3400 };
+const PER_KM = 250;
+const PER_MINUTE = 45;
 
 // A driver should never net less than this per completed ride, even on a
 // very short/cheap trip where 20% commission would otherwise leave them
-// with almost nothing. Raised from 400 — on a short trip that's barely
-// worth a driver's fuel and time once you account for the drive back to
-// pick up the next rider.
-const MIN_DRIVER_NET_PAYOUT = 550; // was 400
+// with almost nothing.
+const MIN_DRIVER_NET_PAYOUT = 800;
 
 // Rush-hour floor multiplier, keyed by local hour (0-23). Hours not listed
 // default to 1.0 (no surge).
