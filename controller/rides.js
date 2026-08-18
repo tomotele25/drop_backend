@@ -11,7 +11,9 @@ const DriverEarning = require("../model/driverEarning");
 const DriverCommission = require("../model/driverCommission");
 const axios = require("axios");
 const { initializeTransaction } = require("../utils/paystack");
-const { PLATFORM_COMMISSION_RATE } = require("../config/earnings");
+const { RECENT_REQUEST_WINDOW_MINUTES } = require("../config/pricing");
+const { calculateFare } = require("../utils/fareCalculator");
+const { getPricingConfig } = require("../utils/pricingConfig");
 const { RIDE_OFFER_TIMEOUT_MS, STUCK_ACTIVE_RIDE_TIMEOUT_MS } = require("../config/dispatch");
 const { sendPushToUser } = require("../utils/webpush");
 const { sendExpoPushToUser } = require("../utils/expoPush");
@@ -79,6 +81,20 @@ const findAvailableNearbyDrivers = async (pickupLoc, radiusKm = 10) => {
   );
 
   return availableDrivers;
+};
+
+// Rough live-demand signal for surge pricing: how many rides have been
+// requested near this pickup point in the last few minutes, regardless of
+// current status (a ride that's since been accepted still reflects demand
+// that existed moments ago). Not geo-indexed on purpose — this only scans
+// recent rows via the requestedAt window, which stays small.
+const countRecentPendingRequestsNear = async (pickupLoc, radiusKm = 10) => {
+  const cutoff = new Date(Date.now() - RECENT_REQUEST_WINDOW_MINUTES * 60 * 1000);
+  return Ride.countDocuments({
+    requestedAt: { $gte: cutoff },
+    "pickupCoordinates.lat": { $gte: pickupLoc.lat - radiusKm / 111, $lte: pickupLoc.lat + radiusKm / 111 },
+    "pickupCoordinates.lng": { $gte: pickupLoc.lng - radiusKm / 111, $lte: pickupLoc.lng + radiusKm / 111 },
+  });
 };
 
 // Admin-triggerable version of the self-heal step in
@@ -224,8 +240,18 @@ const dispatchRideToDrivers = async (rideDoc) => {
 const settleDriverEarning = async (rideDoc) => {
   if (!rideDoc.driver || rideDoc.paymentStatus !== "paid") return;
 
-  const commissionRate = PLATFORM_COMMISSION_RATE;
-  const commissionAmount = Math.round(rideDoc.basePrice * commissionRate);
+  const pricing = await getPricingConfig();
+  const commissionRate = pricing.platformCommissionRate;
+  // Never let the driver's take fall below minDriverNetPayout, regardless
+  // of how cheap the ride computes to — the commission simply shrinks (or
+  // hits 0) on very short/cheap trips instead of undercutting the floor.
+  const commissionAmount = Math.max(
+    0,
+    Math.min(
+      Math.round(rideDoc.basePrice * commissionRate),
+      rideDoc.basePrice - pricing.minDriverNetPayout,
+    ),
+  );
 
   const isDirectToDriver =
     rideDoc.paymentMethod === "cash" || rideDoc.paymentMethod === "transfer";
@@ -421,25 +447,17 @@ const bookRide = async (req, res) => {
     const duration = Math.ceil(leg.duration.value / 60);
 
     // CALCULATE FARE (server-side only — never trust a client-supplied fare)
-    const BASE_FARES = { standard: 500, premium: 1000 };
-    const PER_KM = 149;
-    const PER_MINUTE = 22;
-
-    const normalizedType = rideType.toLowerCase();
-    if (!(normalizedType in BASE_FARES)) {
+    const pricing = await getPricingConfig();
+    if (!(rideType.toLowerCase() in pricing.baseFares)) {
       return res.status(400).json({
         success: false,
         message: "Invalid ride type",
       });
     }
 
-    const fareCalc =
-      BASE_FARES[normalizedType] + distance * PER_KM + duration * PER_MINUTE;
-
-    basePrice = Math.ceil(fareCalc / 50) * 50;
-
     // Pre-flight check only — confirms drivers exist before we ever charge
     // the customer. The actual dispatch re-queries fresh availability later.
+    // Also feeds the live surge calculation below.
     const preCheckDrivers = await findAvailableNearbyDrivers(pickupLoc, 10);
     if (!preCheckDrivers.length) {
       return res.status(400).json({
@@ -447,6 +465,20 @@ const bookRide = async (req, res) => {
         message: "No drivers available nearby",
       });
     }
+
+    const pendingRequestCount = await countRecentPendingRequestsNear(pickupLoc);
+
+    const fareResult = calculateFare({
+      rideType,
+      distanceKm: distance,
+      durationMinutes: duration,
+      nearbyDriverCount: preCheckDrivers.length,
+      pendingRequestCount,
+      rates: pricing,
+    });
+
+    basePrice = fareResult.basePrice;
+    const surgeMultiplier = fareResult.surgeMultiplier;
 
     // ✅ CREATE RIDE WITH NO DRIVER ASSIGNED, UNPAID UNTIL PAYMENT SETTLES
     const ride = await Ride.create({
@@ -460,6 +492,7 @@ const bookRide = async (req, res) => {
       rideType,
       passengers,
       basePrice,
+      surgeMultiplier,
       status: "pending",
       paymentMethod,
       paymentStatus: "unpaid",
@@ -763,18 +796,26 @@ const getRouteAndRides = async (req, res) => {
 
     const distanceKm = route.distance.value / 1000;
     const durationMinutes = route.duration.value / 60;
+    const pickupLoc = route.start_location;
 
-    const BASE_FARES = { standard: 500, premium: 1000 };
-    const PER_KM = 149;
-    const PER_MINUTE = 22;
+    const [nearbyDrivers, pendingRequestCount, pricing] = await Promise.all([
+      findAvailableNearbyDrivers(pickupLoc, 10),
+      countRecentPendingRequestsNear(pickupLoc),
+      getPricingConfig(),
+    ]);
 
-    const calculateFare = (type) =>
-      Math.ceil(
-        (BASE_FARES[type] +
-          distanceKm * PER_KM +
-          durationMinutes * PER_MINUTE) /
-          50,
-      ) * 50;
+    const estimateFor = (type) =>
+      calculateFare({
+        rideType: type,
+        distanceKm,
+        durationMinutes,
+        nearbyDriverCount: nearbyDrivers.length,
+        pendingRequestCount,
+        rates: pricing,
+      });
+
+    const standardEstimate = estimateFor("standard");
+    const premiumEstimate = estimateFor("premium");
 
     return res.json({
       success: true,
@@ -783,9 +824,11 @@ const getRouteAndRides = async (req, res) => {
       distanceKm,
       durationMinutes,
       fares: {
-        standard: calculateFare("standard"),
-        premium: calculateFare("premium"),
+        standard: standardEstimate.basePrice,
+        premium: premiumEstimate.basePrice,
       },
+      surgeMultiplier: standardEstimate.surgeMultiplier,
+      surgeReason: standardEstimate.breakdown.reason,
     });
   } catch (error) {
     console.error(error);

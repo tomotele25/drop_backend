@@ -3,6 +3,9 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const sendSignupEmail  = require("../mailer");
 const Rider = require("../model/rider");
+const Wallet = require("../model/wallet");
+const ExpoPushToken = require("../model/expoPushToken");
+const PushSubscription = require("../model/pushSubscription");
 
 // ✅ SIGNUP CONTROLLER
 const signup = async (req, res) => {
@@ -159,4 +162,47 @@ const login = async (req, res) => {
   }
 };
 
-module.exports = { signup, login };
+// ✅ DELETE ACCOUNT (App Store Guideline 5.1.1(v) — apps that support account
+// creation must also let a user delete their account from within the app).
+// Requires re-entering the password, same trust bar as changing anything
+// else sensitive. Ride/parcel/transaction history is intentionally kept —
+// deleting a user's login and personal data doesn't require destroying
+// financial/accounting records tied to past orders — but everything that
+// exists purely to reach this specific person again (push tokens, wallet)
+// is removed.
+const deleteAccount = async (req, res) => {
+  try {
+    const { password } = req.body;
+    if (!password) {
+      return res.status(400).json({
+        success: false,
+        message: "Password is required to delete your account",
+      });
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(400).json({ success: false, message: "Incorrect password" });
+    }
+
+    await Promise.all([
+      ExpoPushToken.deleteMany({ user: user._id }),
+      PushSubscription.deleteMany({ user: user._id }),
+      Wallet.deleteOne({ user: user._id }),
+      Rider.deleteOne({ user: user._id }),
+    ]);
+    await User.deleteOne({ _id: user._id });
+
+    return res.status(200).json({ success: true, message: "Account deleted" });
+  } catch (error) {
+    console.error("Delete account error:", error.message);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+module.exports = { signup, login, deleteAccount };

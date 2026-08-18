@@ -12,15 +12,17 @@ const sendPackage = async (req, res) => {
       message,
       paymentBy,
       express,
+      packageType,
     } = req.body;
 
- 
+
     if (
       !pickup ||
       !destination ||
       !senderPhone ||
       !receiverPhone ||
-      !paymentBy
+      !paymentBy ||
+      !packageType
     ) {
       return res.status(400).json({
         success: false,
@@ -84,6 +86,7 @@ const sendPackage = async (req, res) => {
       message: message || "",
       paymentBy,
       express: express || "standard",
+      packageType,
       senderId: req.user.id,
       image: req.file?.path || null,
     });

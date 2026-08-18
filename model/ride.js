@@ -56,6 +56,13 @@ const rideSchema = new mongoose.Schema(
       required: true,
     },
 
+    // Surge multiplier actually applied when basePrice was computed (1.0 =
+    // no surge). Persisted for auditability/support disputes.
+    surgeMultiplier: {
+      type: Number,
+      default: 1.0,
+    },
+
     // Passengers
     passengers: [
       {

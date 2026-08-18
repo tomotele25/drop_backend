@@ -117,6 +117,7 @@ const sendParcelNotificationEmail = async (parcel, retries = 3) => {
     subject: `New Package Delivery Request — ${parcel.pickup} → ${parcel.destination}`,
     text: [
       "New package delivery request",
+      `Item type: ${parcel.packageType}`,
       `Pickup: ${parcel.pickup}`,
       `Destination: ${parcel.destination}`,
       `Sender phone: ${parcel.senderPhone}`,
@@ -140,6 +141,7 @@ const sendParcelNotificationEmail = async (parcel, retries = 3) => {
               : ""
           }
           <table style="width: 100%; border-collapse: collapse;">
+            ${row("Item type", parcel.packageType)}
             ${row("Pickup", parcel.pickup)}
             ${row("Destination", parcel.destination)}
             ${row("Sender phone", parcel.senderPhone)}

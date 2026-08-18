@@ -22,6 +22,11 @@ const PercelSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    packageType: {
+      type: String,
+      enum: ["Food", "Documents", "Electronics", "Clothing/Fashion", "Fragile/Breakable", "Other"],
+      required: true,
+    },
     receiverPhone: {
       type: String,
       required: true,
