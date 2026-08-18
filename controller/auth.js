@@ -162,6 +162,61 @@ const login = async (req, res) => {
   }
 };
 
+// ✅ UPDATE PROFILE — customer-facing edit of fullname/email/contact. Rider
+// (driver) profile editing already exists separately at
+// PATCH /riders/:id/profile (controller/rider.js) since drivers have extra
+// fields (photo, vehicle info) this endpoint doesn't touch.
+const updateProfile = async (req, res) => {
+  try {
+    const { fullname, email, contact } = req.body || {};
+    if (!fullname || !email || !contact) {
+      return res.status(400).json({
+        success: false,
+        message: "fullname, email, and contact are all required",
+      });
+    }
+
+    const emailRegex = /\S+@\S+\.\S+/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ success: false, message: "Invalid email format" });
+    }
+
+    const conflict = await User.findOne({
+      _id: { $ne: req.user.id },
+      $or: [{ email }, { contact }],
+    });
+    if (conflict) {
+      return res.status(400).json({
+        success: false,
+        message: "That email or phone number is already in use by another account",
+      });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.user.id,
+      { fullname, email, contact },
+      { new: true },
+    );
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      user: {
+        _id: user._id,
+        fullname: user.fullname,
+        email: user.email,
+        contact: user.contact,
+        role: user.role,
+      },
+    });
+  } catch (error) {
+    console.error("Update profile error:", error.message);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
 // ✅ DELETE ACCOUNT (App Store Guideline 5.1.1(v) — apps that support account
 // creation must also let a user delete their account from within the app).
 // Requires re-entering the password, same trust bar as changing anything
@@ -205,4 +260,4 @@ const deleteAccount = async (req, res) => {
   }
 };
 
-module.exports = { signup, login, deleteAccount };
+module.exports = { signup, login, updateProfile, deleteAccount };
