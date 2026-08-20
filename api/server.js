@@ -25,7 +25,7 @@ const { runDailySettlement } = require("../controller/payout");
 
 // Models
 const Ride = require("../model/ride");
-const { settleDriverEarning, expireStalePendingRides, expireStuckActiveRides } = require("../controller/rides");
+const { settleDriverEarning, expireStalePendingRides, expireStuckActiveRides, findPendingRidesNear } = require("../controller/rides");
 const Rider = require("../model/rider");
 const CarpoolRoom = require("../model/carpool");
 
@@ -390,6 +390,43 @@ io.on("connection", (socket) => {
       });
     } catch (err) {
       console.error("❌ Pending ride error:", err.message);
+    }
+
+    // Catch this driver up on any still-unclaimed nearby rides too — not
+    // just ones already assigned to them. dispatchRideToDrivers only ever
+    // runs once, at booking time, so a driver who was offline then (or who
+    // just wasn't in the broadcast) would otherwise never find out about a
+    // ride that's still genuinely pending. See findPendingRidesNear for why
+    // this doesn't use $near (pickupCoordinates isn't geo-indexed).
+    try {
+      const driverDoc = await Rider.findById(dId).select("currentLocation");
+      if (driverDoc?.currentLocation?.latitude) {
+        const unclaimedRides = await findPendingRidesNear({
+          lat: driverDoc.currentLocation.latitude,
+          lng: driverDoc.currentLocation.longitude,
+        });
+
+        unclaimedRides.forEach((ride) => {
+          io.to(socket.id).emit("rideAssigned", {
+            rideId: ride._id.toString(),
+            pickup: ride.pickup,
+            destination: ride.destination,
+            pickupCoordinates: ride.pickupCoordinates,
+            destinationCoordinates: ride.destinationCoordinates,
+            distance: ride.distance,
+            duration: ride.duration,
+            fare: ride.basePrice,
+            passengerName: ride.passengers?.[0]?.name || "Passenger",
+            rideType: ride.rideType,
+          });
+        });
+
+        if (unclaimedRides.length) {
+          console.log(`🚦 Replayed ${unclaimedRides.length} unclaimed pending ride(s) to reconnecting driver ${dId}`);
+        }
+      }
+    } catch (err) {
+      console.error("❌ Unclaimed pending ride replay error:", err.message);
     }
 
     // Replay any carpool rooms assigned to this driver that are still in_progress

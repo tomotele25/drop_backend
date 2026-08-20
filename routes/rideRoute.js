@@ -15,6 +15,7 @@ const {
   geocodeAddress,
   backfillDriverLocations,
   runStuckActiveRideCleanup,
+  getPendingRidesNearMe,
 } = require("../controller/rides");
 const {authenticateToken,ridersOnly} = require("../middleware/riders")
 const { bookingLimiter } = require("../middleware/rateLimit");
@@ -33,6 +34,11 @@ router.get("/rider/:id", getRiderById);
 
 
 router.get("/rides/customer/:id", authenticateToken, getCustomerRides)
+
+// Must be registered before "/rides/:id" below, or Express's wildcard
+// would greedily match "pending-near-me" as the :id param (same route-
+// ordering pitfall documented on payoutRoute vs rideRoute in api/server.js).
+router.get("/rides/pending-near-me", authenticateToken, getPendingRidesNearMe);
 
 router.get("/rides/:id", authenticateToken, getTotalRides)
 

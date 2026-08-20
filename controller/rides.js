@@ -97,6 +97,66 @@ const countRecentPendingRequestsNear = async (pickupLoc, radiusKm = 10) => {
   });
 };
 
+// A driver who was offline (no live socket) at the moment a ride was
+// dispatched never receives that offer, and dispatchRideToDrivers is a
+// one-time snapshot — it's never re-run for a ride that's still sitting
+// unclaimed. This lets a driver who comes online later catch a ride that's
+// still genuinely pending (not yet accepted, not yet expired), via either
+// the registerDriver socket replay or the REST endpoint below. Same
+// bounding-box approach as countRecentPendingRequestsNear just above —
+// pickupCoordinates isn't a geo-indexed field, and the pending-ride volume
+// this scans is small enough that an exact $near index isn't worth adding.
+const findPendingRidesNear = async (pickupLoc, radiusKm = 10) => {
+  return Ride.find({
+    status: "pending",
+    driver: null,
+    paymentStatus: "paid",
+    "pickupCoordinates.lat": { $gte: pickupLoc.lat - radiusKm / 111, $lte: pickupLoc.lat + radiusKm / 111 },
+    "pickupCoordinates.lng": { $gte: pickupLoc.lng - radiusKm / 111, $lte: pickupLoc.lng + radiusKm / 111 },
+  });
+};
+
+// REST fallback for a driver's app to call explicitly on going online,
+// rather than relying solely on the registerDriver socket replay (which
+// only fires on a fresh connection, not e.g. an app that was already
+// connected before the driver flipped isActive on).
+const getPendingRidesNearMe = async (req, res) => {
+  try {
+    if (!req.user?.riderId) {
+      return res.status(403).json({ success: false, message: "Drivers only" });
+    }
+
+    const rider = await Rider.findById(req.user.riderId).select("currentLocation");
+    if (!rider?.currentLocation?.latitude) {
+      return res.status(200).json({ success: true, rides: [] });
+    }
+
+    const rides = await findPendingRidesNear({
+      lat: rider.currentLocation.latitude,
+      lng: rider.currentLocation.longitude,
+    });
+
+    return res.status(200).json({
+      success: true,
+      rides: rides.map((ride) => ({
+        rideId: ride._id.toString(),
+        pickup: ride.pickup,
+        destination: ride.destination,
+        pickupCoordinates: ride.pickupCoordinates,
+        destinationCoordinates: ride.destinationCoordinates,
+        distance: ride.distance,
+        duration: ride.duration,
+        fare: ride.basePrice,
+        passengerName: ride.passengers?.[0]?.name,
+        rideType: ride.rideType,
+      })),
+    });
+  } catch (error) {
+    console.error("Get pending rides near me error:", error.message);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
 // Admin-triggerable version of the self-heal step in
 // findAvailableNearbyDrivers, so currently-online drivers with a stale
 // `location` field can be fixed immediately instead of waiting for the
@@ -1291,4 +1351,6 @@ module.exports = {
   dispatchRideToDrivers,
   settleDriverEarning,
   expireStalePendingRides,
+  findPendingRidesNear,
+  getPendingRidesNearMe,
 };
